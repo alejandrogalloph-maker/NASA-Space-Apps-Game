@@ -1,0 +1,58 @@
+class resources
+{
+    int max;
+    int current;
+
+    int getResources()
+    {
+        return current;
+    }
+
+    int getMaxResources()
+    {
+        return max;
+    }
+    void addResources(unsigned int N)
+    {
+        current += N;
+        if (current > max)
+        {
+            current = max;
+        }
+    }
+
+    bool SubtractResources(unsigned int N)
+    {
+        if (current - N < 0)
+        {
+            return false;
+        }
+        else
+        {
+            current -= N;
+            return true;
+        }
+    }
+
+    void AddMax(unsigned int N)
+    {
+        max += N;
+    }
+
+    bool subtractMax(unsigned int N)
+    {
+        max -= N;
+        if (max < 0)
+        {
+            max += N;
+            return false;
+        }
+        if (current > max)
+        {
+            current = max;
+            return true;
+        }
+    }
+};
+
+resources 
