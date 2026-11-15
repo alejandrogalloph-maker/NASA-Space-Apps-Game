@@ -1,11 +1,17 @@
+"""Building types, their local resource storage, and colony logistics."""
+
 import Resource_Class as resource_inventory
 
 
 class building:
+    """Common state, staffing limits, and operating costs for a building."""
+
+    # Subclasses set these values to define their own fixed costs and capacity.
     maintenance_cost: int | float = 0
     production_cost: int | float = 0
     worker_cost: int | float = 0
     max_worker_capacity: int = 0
+    # Physical volume in cubic meters; subclasses can override the default.
     volume: int | float = 100
 
     def __init__(
@@ -14,7 +20,9 @@ class building:
         safety_rating: int | float = 0,
         number_of_workers: int = 0,
     ):
+        """Create a building and copy its type's fixed costs onto the instance."""
         building_type = type(self)
+        # Reject invalid type-level costs before creating a usable building.
         if min(
             building_type.maintenance_cost,
             building_type.production_cost,
@@ -28,14 +36,17 @@ class building:
         self.worker_cost = building_type.worker_cost
         self.safety_rating = safety_rating
         self.number_of_workers = number_of_workers
+        # Buildings begin operational; turning one off does not clear its storage.
         self.is_on = True
 
     @property
     def number_of_workers(self) -> int:
+        """Return the number of workers currently assigned."""
         return self._number_of_workers
 
     @number_of_workers.setter
     def number_of_workers(self, count: int) -> None:
+        """Set staffing only when it is an integer within this type's capacity."""
         if not isinstance(count, int) or isinstance(count, bool):
             raise TypeError("Number of workers must be an integer")
         if count < 0:
@@ -48,6 +59,7 @@ class building:
         self._number_of_workers = count
 
     def get_info(self) -> str:
+        """Return a readable summary of costs, staffing, volume, and state."""
         return (
             f"Building Name: {self.name}, "
             f"Maintenance Cost: {self.maintenance_cost}, "
@@ -61,6 +73,7 @@ class building:
         )
 
     def calculate_total_cost(self) -> int | float:
+        """Add fixed maintenance/production costs and cost per assigned worker."""
         return (
             self.maintenance_cost
             + self.production_cost
@@ -68,15 +81,20 @@ class building:
         )
 
     def turn_on(self) -> None:
+        """Enable the building's operational behavior."""
         self.is_on = True
 
     def turn_off(self) -> None:
+        """Disable operational behavior without discarding stored resources."""
         self.is_on = False
 
 
 class ResourceBuilding(building):
+    """Building that produces one resource into its own local storage."""
+
     resource_attribute: str
     production_rate: int | float = 1
+    # Each produced resource has its own bounded local inventory.
     storage_capacity: int | float = 1000
 
     def __init__(
@@ -85,11 +103,13 @@ class ResourceBuilding(building):
         safety_rating: int | float = 0,
         number_of_workers: int = 0,
     ):
+        """Set up local storage for the resource produced by this building type."""
         super().__init__(name, safety_rating, number_of_workers)
         self.storage: dict[str, resource_inventory.resources] = {}
         self._get_storage(self.resource_attribute)
 
     def _get_storage(self, attribute: str) -> resource_inventory.resources:
+        """Get or lazily create storage for a resource, using the type's capacity."""
         if attribute not in self.storage:
             self.storage[attribute] = resource_inventory.resources(
                 max_val=type(self).storage_capacity
@@ -97,6 +117,7 @@ class ResourceBuilding(building):
         return self.storage[attribute]
 
     def get_info(self) -> str:
+        """Include local inventory levels in the common building summary."""
         storage_info = ", ".join(
             f"{name}: {inventory.getResources()}/{inventory.getMaxResources()}"
             for name, inventory in self.storage.items()
@@ -104,6 +125,7 @@ class ResourceBuilding(building):
         return super().get_info() + f", Local Storage: {{{storage_info}}}"
 
     def produce(self, amount: int | float | None = None) -> int | float:
+        """Produce up to the requested amount; return the amount storage accepted."""
         quantity = self.production_rate if amount is None else amount
         if quantity < 0:
             raise ValueError("Production amount must be non-negative")
@@ -111,12 +133,14 @@ class ResourceBuilding(building):
             return 0
 
         storage = self._get_storage(self.resource_attribute)
+        # Report actual accepted production so a full store does not overstate output.
         previous_amount = storage.getResources()
         storage.addResources(quantity)
         return storage.getResources() - previous_amount
 
 
 class WaterExtractor(ResourceBuilding):
+    """Extracts water into local storage."""
     resource_attribute = "water"
     maintenance_cost = 8
     production_cost = 450
@@ -125,6 +149,7 @@ class WaterExtractor(ResourceBuilding):
 
 
 class OxygenGenerator(ResourceBuilding):
+    """Generates oxygen into local storage."""
     resource_attribute = "oxigen"
     maintenance_cost = 6
     production_cost = 400
@@ -133,6 +158,7 @@ class OxygenGenerator(ResourceBuilding):
 
 
 class CarbonDioxideGenerator(ResourceBuilding):
+    """Generates carbon dioxide into local storage."""
     resource_attribute = "CO2"
     maintenance_cost = 5
     production_cost = 350
@@ -141,6 +167,7 @@ class CarbonDioxideGenerator(ResourceBuilding):
 
 
 class NitrogenGenerator(ResourceBuilding):
+    """Generates nitrogen into local storage."""
     resource_attribute = "Nitrogen"
     maintenance_cost = 7
     production_cost = 500
@@ -149,6 +176,7 @@ class NitrogenGenerator(ResourceBuilding):
 
 
 class HydrogenGenerator(ResourceBuilding):
+    """Generates hydrogen into local storage."""
     resource_attribute = "Hydrogen"
     maintenance_cost = 9
     production_cost = 650
@@ -157,6 +185,7 @@ class HydrogenGenerator(ResourceBuilding):
 
 
 class FoodFactory(ResourceBuilding):
+    """Produces food into local storage."""
     resource_attribute = "food"
     maintenance_cost = 12
     production_cost = 800
@@ -165,6 +194,7 @@ class FoodFactory(ResourceBuilding):
 
 
 class PowerPlant(ResourceBuilding):
+    """Produces electricity into local storage."""
     resource_attribute = "electricity"
     maintenance_cost = 15
     production_cost = 1000
@@ -173,6 +203,7 @@ class PowerPlant(ResourceBuilding):
 
 
 class FuelRefinery(ResourceBuilding):
+    """Produces fuel into local storage."""
     resource_attribute = "fuel"
     maintenance_cost = 14
     production_cost = 900
@@ -181,6 +212,7 @@ class FuelRefinery(ResourceBuilding):
 
 
 class AluminumMine(ResourceBuilding):
+    """Produces aluminum into local storage."""
     resource_attribute = "aluminum"
     maintenance_cost = 12
     production_cost = 750
@@ -189,6 +221,7 @@ class AluminumMine(ResourceBuilding):
 
 
 class SteelMill(ResourceBuilding):
+    """Produces steel into local storage."""
     resource_attribute = "steel"
     maintenance_cost = 16
     production_cost = 1000
@@ -197,6 +230,7 @@ class SteelMill(ResourceBuilding):
 
 
 class SoilProcessor(ResourceBuilding):
+    """Produces processed dirt into local storage."""
     resource_attribute = "dirt"
     maintenance_cost = 8
     production_cost = 550
@@ -205,6 +239,7 @@ class SoilProcessor(ResourceBuilding):
 
 
 class PlasticFactory(ResourceBuilding):
+    """Produces plastic into local storage."""
     resource_attribute = "plastic"
     maintenance_cost = 13
     production_cost = 900
@@ -213,6 +248,7 @@ class PlasticFactory(ResourceBuilding):
 
 
 class GlassFactory(ResourceBuilding):
+    """Produces glass into local storage."""
     resource_attribute = "glass"
     maintenance_cost = 10
     production_cost = 750
@@ -221,6 +257,7 @@ class GlassFactory(ResourceBuilding):
 
 
 class CarFactory(ResourceBuilding):
+    """Produces cars into local storage."""
     resource_attribute = "cars"
     maintenance_cost = 20
     production_cost = 1500
@@ -229,6 +266,7 @@ class CarFactory(ResourceBuilding):
 
 
 class TruckFactory(ResourceBuilding):
+    """Produces trucks into local storage."""
     resource_attribute = "trucks"
     maintenance_cost = 24
     production_cost = 1800
@@ -237,6 +275,7 @@ class TruckFactory(ResourceBuilding):
 
 
 class RoverFactory(ResourceBuilding):
+    """Produces rovers into local storage."""
     resource_attribute = "rovers"
     maintenance_cost = 28
     production_cost = 2200
@@ -245,6 +284,7 @@ class RoverFactory(ResourceBuilding):
 
 
 class SatelliteFactory(ResourceBuilding):
+    """Produces satellites into local storage."""
     resource_attribute = "satellites"
     maintenance_cost = 35
     production_cost = 3000
@@ -253,6 +293,7 @@ class SatelliteFactory(ResourceBuilding):
 
 
 class RocketFactory(ResourceBuilding):
+    """Produces rockets into local storage."""
     resource_attribute = "rockets"
     maintenance_cost = 60
     production_cost = 6000
@@ -261,6 +302,7 @@ class RocketFactory(ResourceBuilding):
 
 
 class DroneFactory(ResourceBuilding):
+    """Produces drones into local storage."""
     resource_attribute = "drones"
     maintenance_cost = 18
     production_cost = 1300
@@ -269,6 +311,9 @@ class DroneFactory(ResourceBuilding):
 
 
 class Farm(ResourceBuilding):
+    """Produces seeds or crops for one selected crop variety."""
+
+    # Each crop maps to its seed resource name and its harvested resource name.
     CROP_RESOURCES = {
         "lettuce": ("seed_Lettuce", "lettuce"),
         "wheat": ("seed_Wheat", "wheat"),
@@ -284,6 +329,7 @@ class Farm(ResourceBuilding):
         safety_rating: int | float = 0,
         number_of_workers: int = 0,
     ):
+        """Create a farm after validating its crop and chosen product."""
         normalized_crop = crop.lower()
         if normalized_crop not in self.CROP_RESOURCES:
             raise ValueError(f"Unsupported crop: {crop}")
@@ -299,6 +345,7 @@ class Farm(ResourceBuilding):
         )
 
     def set_crop(self, crop: str) -> None:
+        """Choose which supported crop this farm produces."""
         normalized_crop = crop.lower()
         if normalized_crop not in self.CROP_RESOURCES:
             raise ValueError(f"Unsupported crop: {crop}")
@@ -311,13 +358,16 @@ class Farm(ResourceBuilding):
     max_worker_capacity = 6
 
     def set_product_type(self, product_type: str) -> None:
+        """Switch production between the selected crop's seeds and harvested crop."""
         if product_type not in ("seed", "crop"):
             raise ValueError("Product type must be 'seed' or 'crop'")
         self.product_type = product_type
         self._update_resource_attribute()
 
     def _update_resource_attribute(self) -> None:
+        """Resolve the selected crop/product to its inventory resource name."""
         if self.crop and self.product_type:
+            # Keep each product in separate storage when switching farm modes.
             resource_index = 0 if self.product_type == "seed" else 1
             self.resource_attribute = self.CROP_RESOURCES[self.crop][resource_index]
             if hasattr(self, "storage"):
@@ -325,13 +375,18 @@ class Farm(ResourceBuilding):
 
 
 class IceMinor(WaterExtractor):
+    """Water extractor representing an industrial ice-mining facility."""
+
     type_of_building = "Industrial"
 
     def get_info(self) -> str:
+        """Append the specific facility type to the inherited building summary."""
         return super().get_info() + ", Type: IceMinor"
 
 
 class Habitation(building):
+    """Provides residential space and a maximum number of residents."""
+
     maintenance_cost = 20
     production_cost = 1200
     worker_cost = 4
@@ -341,6 +396,8 @@ class Habitation(building):
 
 
 class RecreationCenter(building):
+    """Provides recreation facilities for the colony."""
+
     maintenance_cost = 12
     production_cost = 800
     worker_cost = 3
@@ -349,6 +406,8 @@ class RecreationCenter(building):
 
 
 class Canteen(building):
+    """Provides shared meal facilities for the colony."""
+
     maintenance_cost = 15
     production_cost = 900
     worker_cost = 4
@@ -357,6 +416,8 @@ class Canteen(building):
 
 
 class LogisticsBuilding(building):
+    """Transfers locally stored resources into the colony-wide inventories."""
+
     maintenance_cost = 18
     production_cost = 1100
     worker_cost = 5
@@ -371,12 +432,14 @@ class LogisticsBuilding(building):
         number_of_workers: int = 0,
         transfer_amount: int | float = 100,
     ):
+        """Configure a non-negative per-resource transfer limit for each turn."""
         if transfer_amount < 0:
             raise ValueError("Transfer amount must be non-negative")
         super().__init__(name, safety_rating, number_of_workers)
         self.transfer_amount = transfer_amount
 
     def get_info(self) -> str:
+        """Include the configured per-turn resource transfer limit."""
         return (
             super().get_info()
             + f", Transfer Amount per Resource Building per Turn: "
@@ -386,11 +449,13 @@ class LogisticsBuilding(building):
     def process_turn(
         self, buildings: list[ResourceBuilding]
     ) -> dict[str, int | float]:
+        """Transfer available resources, returning the accepted amount by resource."""
         transferred: dict[str, int | float] = {}
         for source in buildings:
             if not isinstance(source, ResourceBuilding):
                 raise TypeError("Logistics can only transfer from resource buildings")
             for resource_name, local_storage in source.storage.items():
+                # Limit transfer by both the configured cap and local stock.
                 requested = min(
                     self.transfer_amount,
                     local_storage.getResources(),
@@ -401,6 +466,7 @@ class LogisticsBuilding(building):
                 colony_inventory = getattr(resource_inventory, resource_name)
                 previous_amount = colony_inventory.getResources()
                 colony_inventory.addResources(requested)
+                # Remove only what global storage accepted, preserving overflow locally.
                 accepted = colony_inventory.getResources() - previous_amount
                 if accepted:
                     local_storage.SubtractResources(accepted)
