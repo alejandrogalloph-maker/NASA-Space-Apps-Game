@@ -1,3 +1,4 @@
+import Resource_Class as resource_inventory
 from Resource_Class import (
     water, oxigen, CO2, Nitrogen, Hydrogen, food, electricity, fuel,
     aluminum, steel, dirt, plastic, glass,
@@ -7,6 +8,7 @@ from Resource_Class import (
 )
 from Worker_Class import Worker
 from Building_file import (
+    all_buildings,
     ResourceBuilding,
     PowerPlant,
     OxygenGenerator,
@@ -53,6 +55,7 @@ def choose_mission_setup() -> tuple[str, int]:
 
 
 def setup_game(space_key: str = 'mars', crew_count: int = 6) -> ActionRouter:
+    all_buildings.clear()
     pool = {
         'water': water, 'oxigen': oxigen, 'CO2': CO2, 'Nitrogen': Nitrogen,
         'Hydrogen': Hydrogen, 'food': food, 'electricity': electricity, 'fuel': fuel,
@@ -78,25 +81,39 @@ def setup_game(space_key: str = 'mars', crew_count: int = 6) -> ActionRouter:
 
     workers = [Worker(10000 + i * 350) for i in range(crew_count)]
     buildings = [
-        Habitation('Main Habitation Dome', safety_rating=98, number_of_workers=2),
-        PowerPlant('Main Solar Power Plant', safety_rating=96, number_of_workers=4),
-        OxygenGenerator('MOXIE Oxygen Generator', safety_rating=95, number_of_workers=2),
-        FoodFactory('Hydroponic Food Factory', safety_rating=96, number_of_workers=4),
-        WaterExtractor('Subsurface Water Extractor', safety_rating=92, number_of_workers=3),
-        SteelMill('Colony Steel Mill', safety_rating=90, number_of_workers=4),
-        LogisticsBuilding('Central Logistics Hub', safety_rating=96, number_of_workers=3, transfer_amount=25000),
+        Habitation('Main Habitation Dome', safety_rating=98),
+        PowerPlant('Main Solar Power Plant', safety_rating=96),
+        OxygenGenerator('MOXIE Oxygen Generator', safety_rating=95),
+        FoodFactory('Hydroponic Food Factory', safety_rating=96),
+        WaterExtractor('Subsurface Water Extractor', safety_rating=92),
+        LogisticsBuilding('Central Logistics Hub', safety_rating=96, transfer_amount=25000),
+        SteelMill('Colony Steel Mill', safety_rating=90),
     ]
     state = GameState(pool, workers, buildings, space_key=space_key)
     state.hazard_manager.compute_risk_probability(state)
 
     for key, (max_cap, current_amt) in starting_stock.items():
-        expand_resource_max(state, key, max_cap)
-        add_resource(state, key, current_amt)
+        if pool[key].getMaxResources() == 0:
+            expand_resource_max(state, key, max_cap)
+        if pool[key].getResources() == 0:
+            add_resource(state, key, current_amt)
 
     router = ActionRouter(state)
-    default_roles = [2, 3, 4, 5, 1, 0]
+    default_roles = [1, 2, 3, 4, 5, 2]
     for idx in range(crew_count):
         router.execute('assign_job', idx, default_roles[idx % len(default_roles)])
+
+    initial_assignments = [
+        (0, 0),
+        (1, 1),
+        (3, 2),
+        (4, 3),
+        (5, 4),
+        (2, 5),
+    ]
+    for b_idx, w_idx in initial_assignments:
+        if b_idx < len(buildings) and w_idx < len(workers):
+            router.execute('staff_building', b_idx, w_idx)
 
     return router
 
@@ -106,12 +123,15 @@ def show_status(state: GameState) -> None:
     total_volume = sum(float(getattr(b, 'volume', 100)) for b in state.buildings if getattr(b, 'is_on', True))
     space_label = state.space['label']
     risk_pct = int(state.hazard_manager.last_risk_score * 100)
+    res_pts = int(resource_inventory.research.getResources()) if hasattr(resource_inventory, 'research') else 0
+    elapsed_hrs = getattr(state.time_engine, 'elapsed_hours', (state.sol - 1) * 24)
 
     print()
     print(
-        f'Sol {state.sol} | {space_label} | '
+        f'Sol {state.sol} ({elapsed_hrs}h) | {space_label} | '
         f'Crew: {len(active_crew)}/{len(state.workers)} | Active Volume: {total_volume:.0f} m^3 | '
-        f'Science: {state.science_points:.1f} | Satellites: {state.active_satellites} | Crisis Risk: {risk_pct}%'
+        f'Science: {state.science_points:.1f} | Research Pts: {res_pts} | '
+        f'Satellites: {state.active_satellites} | Crisis Risk: {risk_pct}%'
     )
     print(
         f'Life Support: Water {water.getResources():.1f}/{water.getMaxResources():.0f} | '
@@ -156,6 +176,7 @@ def show_status(state: GameState) -> None:
     print('Buildings:')
     for idx, bld in enumerate(state.buildings):
         power_state = 'On' if getattr(bld, 'is_on', True) else 'Off'
+        op_state = 'OP' if bld.is_operational() else 'IDLE'
         cap = getattr(type(bld), 'max_worker_capacity', 0)
         vol = getattr(bld, 'volume', 100)
         raw_safety = float(getattr(bld, 'safety_rating', 0))
@@ -165,7 +186,7 @@ def show_status(state: GameState) -> None:
             items = [f'{k}:{v.getResources():.1f}/{v.getMaxResources():.0f}' for k, v in bld.storage.items()]
             local_txt = ' | Local: {' + ', '.join(items) + '}'
         print(
-            f'  [{idx}] {bld.name} ({type(bld).__name__}) | {power_state} | Vol: {vol} m^3 | '
+            f'  [{idx}] {bld.name} ({type(bld).__name__}) | {power_state}/{op_state} | Vol: {vol} m^3 | '
             f'Safety: {safety_pct}% | Staff: {bld.number_of_workers}/{cap}{local_txt}'
         )
 
@@ -176,6 +197,8 @@ def show_status(state: GameState) -> None:
             status = 'Retired'
         elif w.getHealth() <= 0:
             status = 'Deceased'
+        elif getattr(w, 'assigned_building', None) is not None:
+            status = f'Staffed @ {w.assigned_building.name}'
         elif w.isAvailable():
             status = 'Ready'
         else:
@@ -198,9 +221,9 @@ def main() -> None:
 
         print()
         print('Routes:', ', '.join(router.available_actions()))
-        print('Build types: power, water, iceminer, oxygen, co2, nitrogen, hydrogen, food, fuel, aluminum, steel, soil, plastic, glass, farm_lettuce, farm_wheat, habitation, recreation, canteen, logistics, research')
+        print('Build types: power, water, iceminer, oxygen, co2, nitrogen, hydrogen, food, fuel, aluminum, steel, soil, plastic, glass, farm_lettuce, farm_wheat, habitation, recreation, canteen, logistics, research, university, medical_bay, hospital, graveyard, comms_hub, satellite_dish')
         print()
-        raw = input('Enter command (e.g. run_moxie 0 | construct_building food | resolve_crises | advance_sol | quit): ').strip()
+        raw = input('Enter command (e.g. unstaff_building 2 5 | mine 5 | advance_sol | advance_sols 3 | quit): ').strip()
         if not raw:
             continue
         parts = raw.split()
@@ -210,14 +233,16 @@ def main() -> None:
             break
 
         try:
-            if cmd in {'advance_sol', 'balance_atmosphere', 'feed_crew', 'maintain_buildings', 'resolve_crises'}:
+            if cmd in {'advance_sol', 'balance_atmosphere', 'feed_crew', 'maintain_buildings', 'resolve_crises', 'transfer_logistics'}:
                 router.execute(cmd)
-            elif cmd in {'work', 'rest', 'hospital', 'study', 'retire', 'run_moxie', 'mine', 'produce_fuel', 'deploy_rover', 'fly_drone', 'launch_satellite', 'launch_rocket', 'toggle_building'}:
+            elif cmd in {'advance_sols', 'work', 'rest', 'hospital', 'study', 'retire', 'run_moxie', 'mine', 'produce_fuel', 'deploy_rover', 'fly_drone', 'launch_satellite', 'launch_rocket', 'toggle_building'}:
                 router.execute(cmd, int(parts[1]))
-            elif cmd in {'assign_job', 'staff_building', 'run_research'}:
+            elif cmd in {'assign_job', 'staff_building', 'unstaff_building', 'run_research'}:
                 router.execute(cmd, int(parts[1]), int(parts[2]))
             elif cmd in {'hydroponics', 'food_refinery', 'refine_materials', 'manufacture'}:
                 router.execute(cmd, int(parts[1]), parts[2])
+            elif cmd == 'university_train':
+                router.execute(cmd, int(parts[1]), int(parts[2]), parts[3])
             elif cmd == 'construct_building':
                 router.execute(cmd, parts[1])
             elif cmd == 'operate_factory':
@@ -229,6 +254,10 @@ def main() -> None:
 
         for entry in state.log[-5:]:
             print(' >', entry)
+
+
+if __name__ == '__main__':
+    main()
 
 
 if __name__ == '__main__':
