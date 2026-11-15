@@ -2,14 +2,59 @@ import random
 from typing import Any, Callable, Dict, List
 
 
+SPACE_ENVIRONMENTS = {
+    'orbit': {
+        'label': 'Low Earth Orbit Station',
+        'solar_multiplier': 1.35,
+        'power_per_space': 4.0,
+        'o2_leak_per_space': 0.25,
+        'n2_leak_per_space': 0.20,
+        'hazard_chance': 0.20,
+    },
+    'moon': {
+        'label': 'Lunar South Pole Base',
+        'solar_multiplier': 1.15,
+        'power_per_space': 6.0,
+        'o2_leak_per_space': 0.30,
+        'n2_leak_per_space': 0.25,
+        'hazard_chance': 0.25,
+    },
+    'mars': {
+        'label': 'Mars Jezero Crater Base',
+        'solar_multiplier': 0.85,
+        'power_per_space': 5.0,
+        'o2_leak_per_space': 0.20,
+        'n2_leak_per_space': 0.15,
+        'hazard_chance': 0.25,
+    },
+    'deep_space': {
+        'label': 'Deep Space Transit Habitat',
+        'solar_multiplier': 0.45,
+        'power_per_space': 8.0,
+        'o2_leak_per_space': 0.35,
+        'n2_leak_per_space': 0.30,
+        'hazard_chance': 0.30,
+    },
+}
+
+
 class GameState:
-    def __init__(self, resource_pool: Dict[str, Any], workers: List[Any], buildings: List[Any]):
+    def __init__(
+        self,
+        resource_pool: Dict[str, Any],
+        workers: List[Any],
+        buildings: List[Any],
+        space_key: str = 'mars',
+    ):
         self.resources = resource_pool
         self.workers = workers
         self.buildings = buildings
+        self.space_key = space_key if space_key in SPACE_ENVIRONMENTS else 'mars'
+        self.space = SPACE_ENVIRONMENTS[self.space_key]
         self.sol = 1
         self.science_points = 0.0
         self.active_satellites = 0
+        self.daily_report: Dict[str, Dict[str, float]] = {}
         self.log: List[str] = []
 
 
@@ -280,7 +325,7 @@ def feed_crew(state: GameState) -> bool:
         return False
     all_fed = True
     for worker in active:
-        fed_food = spend_resource(state, 'food', 3000.0)
+        fed_food = spend_resource(state, 'food', 2000.0)
         fed_water = spend_resource(state, 'water', 2.5)
         if fed_food and fed_water:
             if worker.getHealth() < 100.0:
@@ -541,44 +586,139 @@ def launch_rocket(state: GameState, worker_index: int) -> bool:
 
 def advance_sol(state: GameState) -> None:
     state.sol += 1
-    solar_power = round(random.uniform(55.0, 85.0) + (state.active_satellites * 20.0), 1)
-    add_resource(state, 'electricity', solar_power)
-    state.log.append(f'Sol {state.sol} started: +{solar_power} solar electricity.')
+    env = state.space
+    tracked = ['food', 'water', 'oxigen', 'CO2', 'Nitrogen', 'electricity', 'steel', 'aluminum', 'plastic', 'dirt']
+    gained = {k: 0.0 for k in tracked}
+    spent = {k: 0.0 for k in tracked}
 
     active = [w for w in state.workers if not getattr(w, 'retired', False) and w.getHealth() > 0]
+    people_count = len(active)
+    total_space = max(1, sum(int(getattr(b, 'space_size', 1)) for b in state.buildings))
+
+    ordered_buildings = sorted(
+        state.buildings,
+        key=lambda b: 0 if getattr(b, 'type_of_building', '') == 'Power' else 1,
+    )
+
+    for bld in ordered_buildings:
+        inputs = dict(getattr(bld, 'daily_inputs', {}))
+        outputs = dict(getattr(bld, 'daily_outputs', {}))
+        safety = float(getattr(bld, 'safety_rating', 1.0))
+
+        if inputs and not _spend_bundle(state, inputs):
+            state.log.append(f'{bld.name} offline today (missing inputs).')
+            continue
+
+        for res_name, amt in inputs.items():
+            if res_name in spent:
+                spent[res_name] += amt
+
+        for res_name, amt in outputs.items():
+            scale = env['solar_multiplier'] if res_name == 'electricity' else 1.0
+            produced = round(amt * safety * scale, 1)
+            add_resource(state, res_name, produced)
+            if res_name in gained:
+                gained[res_name] += produced
+
+    if state.active_satellites > 0:
+        sat_power = round(state.active_satellites * 20.0 * env['solar_multiplier'], 1)
+        add_resource(state, 'electricity', sat_power)
+        gained['electricity'] += sat_power
+
+    space_power_cost = round(total_space * env['power_per_space'], 1)
+    space_o2_cost = round(total_space * env['o2_leak_per_space'], 2)
+    space_n2_cost = round(total_space * env['n2_leak_per_space'], 2)
+
+    if spend_resource(state, 'electricity', space_power_cost):
+        spent['electricity'] += space_power_cost
+    else:
+        actual = get_resource(state, 'electricity')
+        spend_resource(state, 'electricity', actual)
+        spent['electricity'] += actual
+        for worker in active:
+            _damage_worker(worker, 6.0)
+        state.log.append(f'Life-support power deficit across {total_space} space units!')
+
+    o2_used = min(space_o2_cost, get_resource(state, 'oxigen'))
+    spend_resource(state, 'oxigen', o2_used)
+    spent['oxigen'] += o2_used
+
+    n2_used = min(space_n2_cost, get_resource(state, 'Nitrogen'))
+    spend_resource(state, 'Nitrogen', n2_used)
+    spent['Nitrogen'] += n2_used
+
     for worker in active:
         worker.age += 1
-        if not spend_resource(state, 'oxigen', 0.84):
+
+        if spend_resource(state, 'food', 2000.0):
+            spent['food'] += 2000.0
+        else:
+            _damage_worker(worker, 15.0)
+            state.log.append(f'Food shortage (-2000 kcal needed)! {worker.Name} took 15 damage.')
+
+        if spend_resource(state, 'water', 2.5):
+            spent['water'] += 2.5
+        else:
+            _damage_worker(worker, 15.0)
+            state.log.append(f'Water shortage (-2.5 L needed)! {worker.Name} took 15 damage.')
+
+        if spend_resource(state, 'oxigen', 0.84):
+            spent['oxigen'] += 0.84
+        else:
             _damage_worker(worker, 20.0)
-            state.log.append(f'Low oxigen! {worker.Name} suffered hypoxia.')
-        if not spend_resource(state, 'water', 2.5):
-            _damage_worker(worker, 15.0)
-            state.log.append(f'Low water! {worker.Name} suffered dehydration.')
-        if not spend_resource(state, 'food', 3000.0):
-            _damage_worker(worker, 15.0)
-            state.log.append(f'Low food! {worker.Name} suffered starvation.')
+            state.log.append(f'Oxigen shortage (-0.84 kg needed)! {worker.Name} took 20 damage.')
+
+        if spend_resource(state, 'electricity', 4.0):
+            spent['electricity'] += 4.0
+
         add_resource(state, 'CO2', 1.0)
+        gained['CO2'] += 1.0
+
         if not worker.isAvailable():
             worker.SendToRest()
 
-    if state.buildings:
-        for bld in state.buildings:
-            if hasattr(bld, 'safety_rating'):
-                bld.safety_rating = max(0.5, round(bld.safety_rating - 0.01, 2))
+    for bld in state.buildings:
+        if hasattr(bld, 'safety_rating'):
+            bld.safety_rating = max(0.5, round(bld.safety_rating - 0.01, 2))
 
-    if random.random() < 0.25 and active:
+    if random.random() < env['hazard_chance'] and active:
         event = random.choice(['dust_storm', 'micrometeorite', 'solar_flare'])
         target = random.choice(active)
         if event == 'dust_storm':
-            spend_resource(state, 'electricity', min(25.0, get_resource(state, 'electricity')))
-            state.log.append('Event: Dust storm drained 25 electricity.')
+            loss = min(25.0, get_resource(state, 'electricity'))
+            spend_resource(state, 'electricity', loss)
+            spent['electricity'] += loss
+            env_label = env['label']
+            state.log.append(f'Space Event ({env_label}): Dust storm drained {loss:.1f} electricity.')
         elif event == 'micrometeorite':
-            spend_resource(state, 'oxigen', min(6.0, get_resource(state, 'oxigen')))
+            loss = min(6.0, get_resource(state, 'oxigen'))
+            spend_resource(state, 'oxigen', loss)
+            spent['oxigen'] += loss
             _damage_worker(target, 10.0)
-            state.log.append(f'Event: Micrometeorite leak (-6 oxigen). {target.Name} took 10 damage.')
+            state.log.append(f'Space Event: Hull micrometeorite (-{loss:.1f} oxigen). {target.Name} took 10 damage.')
         elif event == 'solar_flare':
             target.modDebuff(8.0, 0)
-            state.log.append(f'Event: Solar flare increased debuffs on {target.Name}.')
+            state.log.append(f'Space Event: Solar flare radiation hit {target.Name}.')
+
+    state.daily_report = {
+        k: {
+            'added': round(gained[k], 1),
+            'subtracted': round(spent[k], 1),
+            'net': round(gained[k] - spent[k], 1),
+        }
+        for k in tracked
+        if gained[k] > 0 or spent[k] > 0
+    }
+
+    env_label = env['label']
+    net_food = state.daily_report.get('food', {}).get('net', 0)
+    net_o2 = state.daily_report.get('oxigen', {}).get('net', 0)
+    net_water = state.daily_report.get('water', {}).get('net', 0)
+    net_power = state.daily_report.get('electricity', {}).get('net', 0)
+    state.log.append(
+        f'Sol {state.sol} ({env_label} | Crew: {people_count} | Space: {total_space}): '
+        f'Food {net_food:+.0f} kcal, O2 {net_o2:+.1f}, Water {net_water:+.1f}, Power {net_power:+.1f}'
+    )
 
 
 'Action router'
