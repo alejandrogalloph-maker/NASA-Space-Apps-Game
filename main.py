@@ -7,13 +7,14 @@ from Resource_Class import (
 )
 from Worker_Class import Worker
 from Building_file import (
-    building,
-    Factory,
-    SolarArray,
-    MoxieUnit,
-    HydroponicsBay,
+    ResourceBuilding,
+    PowerPlant,
+    OxygenGenerator,
+    FoodFactory,
     WaterExtractor,
-    HabitatModule,
+    SteelMill,
+    Habitation,
+    LogisticsBuilding,
 )
 from actions import (
     SPACE_ENVIRONMENTS,
@@ -30,10 +31,10 @@ def choose_mission_setup() -> tuple[str, int]:
     for idx, (key, info) in enumerate(options, start=1):
         lbl = info['label']
         sol_m = info['solar_multiplier']
-        pwr_s = info['power_per_space']
-        o2_s = info['o2_leak_per_space']
+        pwr_v = info['power_per_100m3']
+        o2_v = info['o2_leak_per_100m3']
         haz = int(info['hazard_chance'] * 100)
-        print(f'  [{idx}] {lbl} ({key}) | Solar x{sol_m} | Power/Space: -{pwr_s} | O2 Leak/Space: -{o2_s} | Hazard: {haz}%')
+        print(f'  [{idx}] {lbl} ({key}) | Solar x{sol_m} | Power/100m3: -{pwr_v} | O2 Leak/100m3: -{o2_v} | Hazard: {haz}%')
 
     space_choice = input('Enter choice [1-4] (default 3 = Mars): ').strip()
     key_map = {'1': 'orbit', '2': 'moon', '3': 'mars', '4': 'deep_space'}
@@ -77,13 +78,16 @@ def setup_game(space_key: str = 'mars', crew_count: int = 6) -> ActionRouter:
 
     workers = [Worker(10000 + i * 350) for i in range(crew_count)]
     buildings = [
-        SolarArray('Primary Solar Array', 85.0),
-        MoxieUnit('MOXIE Unit 1'),
-        HydroponicsBay('Hydroponics Bay 1'),
-        WaterExtractor('Ice Drill 1'),
-        Factory('Refinery Alpha', 40, 120, 0.95, 2),
+        Habitation('Main Habitation Dome', safety_rating=98, number_of_workers=2),
+        PowerPlant('Main Solar Power Plant', safety_rating=96, number_of_workers=4),
+        OxygenGenerator('MOXIE Oxygen Generator', safety_rating=95, number_of_workers=2),
+        FoodFactory('Hydroponic Food Factory', safety_rating=96, number_of_workers=4),
+        WaterExtractor('Subsurface Water Extractor', safety_rating=92, number_of_workers=3),
+        SteelMill('Colony Steel Mill', safety_rating=90, number_of_workers=4),
+        LogisticsBuilding('Central Logistics Hub', safety_rating=96, number_of_workers=3, transfer_amount=25000),
     ]
     state = GameState(pool, workers, buildings, space_key=space_key)
+    state.hazard_manager.compute_risk_probability(state)
 
     for key, (max_cap, current_amt) in starting_stock.items():
         expand_resource_max(state, key, max_cap)
@@ -99,14 +103,15 @@ def setup_game(space_key: str = 'mars', crew_count: int = 6) -> ActionRouter:
 
 def show_status(state: GameState) -> None:
     active_crew = [w for w in state.workers if not getattr(w, 'retired', False) and w.getHealth() > 0]
-    total_space = max(1, sum(int(getattr(b, 'space_size', 1)) for b in state.buildings))
-
+    total_volume = sum(float(getattr(b, 'volume', 100)) for b in state.buildings if getattr(b, 'is_on', True))
     space_label = state.space['label']
+    risk_pct = int(state.hazard_manager.last_risk_score * 100)
+
     print()
     print(
         f'Sol {state.sol} | {space_label} | '
-        f'Crew: {len(active_crew)}/{len(state.workers)} | Space Units: {total_space} | '
-        f'Science: {state.science_points:.1f} | Satellites: {state.active_satellites}'
+        f'Crew: {len(active_crew)}/{len(state.workers)} | Active Volume: {total_volume:.0f} m^3 | '
+        f'Science: {state.science_points:.1f} | Satellites: {state.active_satellites} | Crisis Risk: {risk_pct}%'
     )
     print(
         f'Life Support: Water {water.getResources():.1f}/{water.getMaxResources():.0f} | '
@@ -141,15 +146,30 @@ def show_status(state: GameState) -> None:
             summary_parts.append(f'{res_name} (+{added:.1f} / -{sub:.1f} = {net:+.1f})')
         print('Last Sol Balance: ' + ' | '.join(summary_parts))
 
+    if state.hazard_manager.active_incidents:
+        print()
+        print('ONGOING CRISES:')
+        for inc in state.hazard_manager.active_incidents:
+            print(f'  [Severity {inc.severity}] {inc.name}: {inc.description}')
+
+    print()
     print('Buildings:')
     for idx, bld in enumerate(state.buildings):
-        in_str = ', '.join(f'{k}:{v}' for k, v in getattr(bld, 'daily_inputs', {}).items()) or 'none'
-        out_str = ', '.join(f'{k}:{v}' for k, v in getattr(bld, 'daily_outputs', {}).items()) or 'none'
+        power_state = 'On' if getattr(bld, 'is_on', True) else 'Off'
+        cap = getattr(type(bld), 'max_worker_capacity', 0)
+        vol = getattr(bld, 'volume', 100)
+        raw_safety = float(getattr(bld, 'safety_rating', 0))
+        safety_pct = int(raw_safety * 100) if raw_safety <= 1.0 else int(raw_safety)
+        local_txt = ''
+        if isinstance(bld, ResourceBuilding):
+            items = [f'{k}:{v.getResources():.1f}/{v.getMaxResources():.0f}' for k, v in bld.storage.items()]
+            local_txt = ' | Local: {' + ', '.join(items) + '}'
         print(
-            f'  [{idx}] {bld.name} ({bld.type_of_building}) | Space: {bld.space_size} | '
-            f'Safety: {int(bld.safety_rating * 100)}% | In: [{in_str}] -> Out: [{out_str}]'
+            f'  [{idx}] {bld.name} ({type(bld).__name__}) | {power_state} | Vol: {vol} m^3 | '
+            f'Safety: {safety_pct}% | Staff: {bld.number_of_workers}/{cap}{local_txt}'
         )
 
+    print()
     print('Crew:')
     for i, w in enumerate(state.workers):
         if getattr(w, 'retired', False):
@@ -170,11 +190,17 @@ def main() -> None:
 
     while True:
         show_status(state)
+        active_crew = [w for w in state.workers if not getattr(w, 'retired', False) and w.getHealth() > 0]
+        if not active_crew:
+            print()
+            print(f'MISSION FAILED on Sol {state.sol}: All crew members lost. Final Science: {state.science_points:.1f}')
+            break
+
         print()
         print('Routes:', ', '.join(router.available_actions()))
-        print('Build types for construct_building: solar, moxie, hydroponics, extractor, habitat, factory')
+        print('Build types: power, water, iceminer, oxygen, co2, nitrogen, hydrogen, food, fuel, aluminum, steel, soil, plastic, glass, farm_lettuce, farm_wheat, habitation, recreation, canteen, logistics, research')
         print()
-        raw = input('Enter command (e.g. run_moxie 0 | construct_building hydroponics | advance_sol | quit): ').strip()
+        raw = input('Enter command (e.g. run_moxie 0 | construct_building food | resolve_crises | advance_sol | quit): ').strip()
         if not raw:
             continue
         parts = raw.split()
@@ -184,26 +210,16 @@ def main() -> None:
             break
 
         try:
-            if cmd in {'advance_sol', 'balance_atmosphere', 'feed_crew', 'maintain_buildings'}:
+            if cmd in {'advance_sol', 'balance_atmosphere', 'feed_crew', 'maintain_buildings', 'resolve_crises'}:
                 router.execute(cmd)
-            elif cmd in {'work', 'rest', 'hospital', 'study', 'retire', 'run_moxie', 'mine', 'produce_fuel', 'deploy_rover', 'fly_drone', 'launch_satellite', 'launch_rocket'}:
+            elif cmd in {'work', 'rest', 'hospital', 'study', 'retire', 'run_moxie', 'mine', 'produce_fuel', 'deploy_rover', 'fly_drone', 'launch_satellite', 'launch_rocket', 'toggle_building'}:
                 router.execute(cmd, int(parts[1]))
-            elif cmd == 'assign_job':
+            elif cmd in {'assign_job', 'staff_building', 'run_research'}:
                 router.execute(cmd, int(parts[1]), int(parts[2]))
             elif cmd in {'hydroponics', 'food_refinery', 'refine_materials', 'manufacture'}:
                 router.execute(cmd, int(parts[1]), parts[2])
             elif cmd == 'construct_building':
-                b_type = parts[1].lower()
-                catalog = {
-                    'solar': SolarArray('Solar Array'),
-                    'moxie': MoxieUnit('MOXIE Unit'),
-                    'hydroponics': HydroponicsBay('Hydroponics Bay'),
-                    'extractor': WaterExtractor('Ice Extractor'),
-                    'habitat': HabitatModule('Habitat Module'),
-                    'factory': Factory('Factory Module', 40, 120, 0.95, 2),
-                }
-                new_bld = catalog.get(b_type, building(parts[1], 30, 80, 0.98, 1))
-                router.execute(cmd, new_bld)
+                router.execute(cmd, parts[1])
             elif cmd == 'operate_factory':
                 router.execute(cmd, int(parts[1]), [int(x) for x in parts[2:]])
             else:
