@@ -1,0 +1,40 @@
+####    Recources    #####
+Human necesities
+
+  int units water
+  double oxigen presure
+  double CO2 presure
+  double Nitrogen presure
+  int food Kcals
+
+Space Survival
+
+  int space suits
+
+  Vehicles
+    int cars
+    int rovers
+    int drones
+    int rockets
+
+  Plant
+    int seeds
+    int fruits
+    int plankton
+
+  Machines
+    int Moxies (Oxigen Generation)
+    int Mining equipment (Ice, Soil)
+    int Food Refinery
+    int hydroponics
+    
+    
+Workers
+  int Unassigned Worker
+  int biologist
+  int doctor
+  int Engineer
+  int pilot
+  int Geologist
+
+
