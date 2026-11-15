@@ -1,6 +1,29 @@
 """Building types, their local resource storage, and colony logistics."""
 
 import Resource_Class as resource_inventory
+from typing import Protocol
+
+
+class ProfessionLike(Protocol):
+    """The profession name exposed by a worker's profession enum."""
+
+    name: str
+
+
+class BuildingWorker(Protocol):
+    """Worker operations that buildings need for staffing and wages."""
+
+    def getType(self) -> ProfessionLike: ...
+
+    def getWage(self) -> int | float: ...
+
+    def setProfession(self, profession: ProfessionLike) -> None: ...
+
+    def isAvailable(self) -> bool: ...
+
+    def SendToWork(self) -> bool: ...
+
+    def SendToRest(self) -> bool: ...
 
 
 class building:
@@ -11,6 +34,8 @@ class building:
     production_cost: int | float = 0
     worker_cost: int | float = 0
     max_worker_capacity: int = 0
+    # Role name maps to the minimum and maximum workers of that profession.
+    required_professions: dict[str, tuple[int, int]] = {}
     # Physical volume in cubic meters; subclasses can override the default.
     volume: int | float = 100
 
@@ -29,47 +54,101 @@ class building:
             building_type.worker_cost,
         ) < 0:
             raise ValueError("Building costs must be non-negative")
+        if number_of_workers != 0:
+            raise ValueError(
+                "Assign Worker objects with assign_worker() instead of setting "
+                "number_of_workers"
+            )
 
         self.name = name
         self.maintenance_cost = building_type.maintenance_cost
         self.production_cost = building_type.production_cost
         self.worker_cost = building_type.worker_cost
         self.safety_rating = safety_rating
-        self.number_of_workers = number_of_workers
+        self.workers: list[BuildingWorker] = []
         # Buildings begin operational; turning one off does not clear its storage.
         self.is_on = True
 
     @property
     def number_of_workers(self) -> int:
-        """Return the number of workers currently assigned."""
-        return self._number_of_workers
+        """Return the number of actual Worker objects assigned to this building."""
+        return len(self.workers)
 
-    @number_of_workers.setter
-    def number_of_workers(self, count: int) -> None:
-        """Set staffing only when it is an integer within this type's capacity."""
-        if not isinstance(count, int) or isinstance(count, bool):
-            raise TypeError("Number of workers must be an integer")
-        if count < 0:
-            raise ValueError("Number of workers must be non-negative")
-        if count > type(self).max_worker_capacity:
+    def _profession_counts(self) -> dict[str, int]:
+        """Count assigned workers by profession name."""
+        counts: dict[str, int] = {}
+        for worker in self.workers:
+            profession = worker.getType().name
+            counts[profession] = counts.get(profession, 0) + 1
+        return counts
+
+    def assign_worker(self, worker: BuildingWorker) -> None:
+        """Assign an available worker if their profession is permitted and in capacity."""
+        profession = worker.getType().name
+        if profession not in type(self).required_professions:
+            raise ValueError(
+                f"{profession} workers cannot work in {type(self).__name__}"
+            )
+        if worker in self.workers:
+            raise ValueError("Worker is already assigned to this building")
+        if not worker.isAvailable():
+            raise ValueError("Worker must be available before assignment")
+        if self.number_of_workers >= type(self).max_worker_capacity:
             raise ValueError(
                 f"{type(self).__name__} capacity is "
                 f"{type(self).max_worker_capacity} workers"
             )
-        self._number_of_workers = count
+
+        _, maximum = type(self).required_professions[profession]
+        current_count = self._profession_counts().get(profession, 0)
+        if current_count >= maximum:
+            raise ValueError(
+                f"{type(self).__name__} allows at most {maximum} "
+                f"{profession} worker(s)"
+            )
+        if not worker.SendToWork():
+            raise ValueError("Worker could not be assigned")
+        self.workers.append(worker)
+
+    def remove_worker(self, worker: BuildingWorker) -> None:
+        """Remove an assigned worker and return them to the available workforce."""
+        if worker not in self.workers:
+            raise ValueError("Worker is not assigned to this building")
+        self.workers.remove(worker)
+        worker.SendToRest()
+
+    def has_required_staff(self) -> bool:
+        """Check that minimum staffing for every required profession is met."""
+        counts = self._profession_counts()
+        return all(
+            counts.get(profession, 0) >= minimum
+            for profession, (minimum, _) in type(self).required_professions.items()
+        )
+
+    def is_operational(self) -> bool:
+        """A building operates only when on and all role minimums are staffed."""
+        return self.is_on and self.has_required_staff()
 
     def get_info(self) -> str:
         """Return a readable summary of costs, staffing, volume, and state."""
+        worker_cost = sum(worker.getWage() for worker in self.workers)
+        role_counts = self._profession_counts()
+        staffing_info = ", ".join(
+            f"{profession}: {role_counts.get(profession, 0)}/{minimum}-{maximum}"
+            for profession, (minimum, maximum) in type(self).required_professions.items()
+        )
         return (
             f"Building Name: {self.name}, "
             f"Maintenance Cost: {self.maintenance_cost}, "
             f"Production Cost: {self.production_cost}, "
-            f"Worker Cost: {self.worker_cost * self.number_of_workers}, "
+            f"Worker Cost: {self.worker_cost * self.number_of_workers + worker_cost}, "
             f"Safety Rating: {self.safety_rating}, "
             f"Number of Workers: {self.number_of_workers}/"
             f"{type(self).max_worker_capacity}, "
+            f"Staffing: {{{staffing_info}}}, "
             f"Volume: {self.volume} m^3, "
-            f"State: {'On' if self.is_on else 'Off'}"
+            f"State: {'On' if self.is_on else 'Off'}, "
+            f"Operational: {self.is_operational()}"
         )
 
     def calculate_total_cost(self) -> int | float:
@@ -78,6 +157,7 @@ class building:
             self.maintenance_cost
             + self.production_cost
             + self.worker_cost * self.number_of_workers
+            + sum(worker.getWage() for worker in self.workers)
         )
 
     def turn_on(self) -> None:
@@ -129,7 +209,7 @@ class ResourceBuilding(building):
         quantity = self.production_rate if amount is None else amount
         if quantity < 0:
             raise ValueError("Production amount must be non-negative")
-        if not self.is_on:
+        if not self.is_operational():
             return 0
 
         storage = self._get_storage(self.resource_attribute)
@@ -146,6 +226,7 @@ class WaterExtractor(ResourceBuilding):
     production_cost = 450
     worker_cost = 3
     max_worker_capacity = 5
+    required_professions = {"Geologist": (1, 5)}
 
 
 class OxygenGenerator(ResourceBuilding):
@@ -155,6 +236,7 @@ class OxygenGenerator(ResourceBuilding):
     production_cost = 400
     worker_cost = 3
     max_worker_capacity = 4
+    required_professions = {"Engineer": (1, 4)}
 
 
 class CarbonDioxideGenerator(ResourceBuilding):
@@ -164,6 +246,7 @@ class CarbonDioxideGenerator(ResourceBuilding):
     production_cost = 350
     worker_cost = 3
     max_worker_capacity = 3
+    required_professions = {"Engineer": (1, 3)}
 
 
 class NitrogenGenerator(ResourceBuilding):
@@ -173,6 +256,7 @@ class NitrogenGenerator(ResourceBuilding):
     production_cost = 500
     worker_cost = 3
     max_worker_capacity = 4
+    required_professions = {"Geologist": (1, 4)}
 
 
 class HydrogenGenerator(ResourceBuilding):
@@ -182,6 +266,7 @@ class HydrogenGenerator(ResourceBuilding):
     production_cost = 650
     worker_cost = 4
     max_worker_capacity = 5
+    required_professions = {"Engineer": (1, 5)}
 
 
 class FoodFactory(ResourceBuilding):
@@ -191,6 +276,7 @@ class FoodFactory(ResourceBuilding):
     production_cost = 800
     worker_cost = 4
     max_worker_capacity = 8
+    required_professions = {"Biologist": (1, 8)}
 
 
 class PowerPlant(ResourceBuilding):
@@ -200,6 +286,7 @@ class PowerPlant(ResourceBuilding):
     production_cost = 1000
     worker_cost = 5
     max_worker_capacity = 8
+    required_professions = {"Engineer": (1, 8)}
 
 
 class FuelRefinery(ResourceBuilding):
@@ -209,6 +296,7 @@ class FuelRefinery(ResourceBuilding):
     production_cost = 900
     worker_cost = 5
     max_worker_capacity = 8
+    required_professions = {"Engineer": (1, 8)}
 
 
 class AluminumMine(ResourceBuilding):
@@ -218,6 +306,7 @@ class AluminumMine(ResourceBuilding):
     production_cost = 750
     worker_cost = 4
     max_worker_capacity = 8
+    required_professions = {"Geologist": (1, 8)}
 
 
 class SteelMill(ResourceBuilding):
@@ -227,6 +316,7 @@ class SteelMill(ResourceBuilding):
     production_cost = 1000
     worker_cost = 5
     max_worker_capacity = 10
+    required_professions = {"Engineer": (1, 10)}
 
 
 class SoilProcessor(ResourceBuilding):
@@ -236,6 +326,7 @@ class SoilProcessor(ResourceBuilding):
     production_cost = 550
     worker_cost = 3
     max_worker_capacity = 6
+    required_professions = {"Geologist": (1, 6)}
 
 
 class PlasticFactory(ResourceBuilding):
@@ -245,6 +336,7 @@ class PlasticFactory(ResourceBuilding):
     production_cost = 900
     worker_cost = 5
     max_worker_capacity = 8
+    required_professions = {"Engineer": (1, 8)}
 
 
 class GlassFactory(ResourceBuilding):
@@ -254,6 +346,7 @@ class GlassFactory(ResourceBuilding):
     production_cost = 750
     worker_cost = 4
     max_worker_capacity = 6
+    required_professions = {"Engineer": (1, 6)}
 
 
 class CarFactory(ResourceBuilding):
@@ -263,6 +356,7 @@ class CarFactory(ResourceBuilding):
     production_cost = 1500
     worker_cost = 6
     max_worker_capacity = 10
+    required_professions = {"Engineer": (1, 10)}
 
 
 class TruckFactory(ResourceBuilding):
@@ -272,6 +366,7 @@ class TruckFactory(ResourceBuilding):
     production_cost = 1800
     worker_cost = 6
     max_worker_capacity = 12
+    required_professions = {"Engineer": (1, 8), "Pilot": (0, 4)}
 
 
 class RoverFactory(ResourceBuilding):
@@ -281,6 +376,7 @@ class RoverFactory(ResourceBuilding):
     production_cost = 2200
     worker_cost = 7
     max_worker_capacity = 10
+    required_professions = {"Engineer": (1, 8), "Pilot": (0, 2)}
 
 
 class SatelliteFactory(ResourceBuilding):
@@ -290,6 +386,7 @@ class SatelliteFactory(ResourceBuilding):
     production_cost = 3000
     worker_cost = 8
     max_worker_capacity = 12
+    required_professions = {"Engineer": (1, 10), "Pilot": (0, 2)}
 
 
 class RocketFactory(ResourceBuilding):
@@ -299,6 +396,7 @@ class RocketFactory(ResourceBuilding):
     production_cost = 6000
     worker_cost = 12
     max_worker_capacity = 20
+    required_professions = {"Engineer": (2, 18), "Pilot": (0, 2)}
 
 
 class DroneFactory(ResourceBuilding):
@@ -308,6 +406,7 @@ class DroneFactory(ResourceBuilding):
     production_cost = 1300
     worker_cost = 5
     max_worker_capacity = 10
+    required_professions = {"Engineer": (1, 8), "Pilot": (0, 2)}
 
 
 class Farm(ResourceBuilding):
@@ -356,6 +455,7 @@ class Farm(ResourceBuilding):
     production_cost = 650
     worker_cost = 3
     max_worker_capacity = 6
+    required_professions = {"Biologist": (1, 6)}
 
     def set_product_type(self, product_type: str) -> None:
         """Switch production between the selected crop's seeds and harvested crop."""
@@ -393,6 +493,7 @@ class Habitation(building):
     max_worker_capacity = 6
     volume = 500
     resident_capacity = 20
+    required_professions = {"Doctor": (1, 6)}
 
 
 class RecreationCenter(building):
@@ -403,6 +504,7 @@ class RecreationCenter(building):
     worker_cost = 3
     max_worker_capacity = 6
     volume = 250
+    required_professions = {"Doctor": (1, 4), "Biologist": (0, 2)}
 
 
 class Canteen(building):
@@ -413,6 +515,7 @@ class Canteen(building):
     worker_cost = 4
     max_worker_capacity = 8
     volume = 200
+    required_professions = {"Biologist": (1, 8)}
 
 
 class LogisticsBuilding(building):
@@ -424,6 +527,7 @@ class LogisticsBuilding(building):
     max_worker_capacity = 8
     volume = 300
     transfer_amount: int | float = 100
+    required_professions = {"Pilot": (1, 8)}
 
     def __init__(
         self,
@@ -451,6 +555,8 @@ class LogisticsBuilding(building):
     ) -> dict[str, int | float]:
         """Transfer available resources, returning the accepted amount by resource."""
         transferred: dict[str, int | float] = {}
+        if not self.has_required_staff():
+            return transferred
         for source in buildings:
             if not isinstance(source, ResourceBuilding):
                 raise TypeError("Logistics can only transfer from resource buildings")
@@ -484,6 +590,7 @@ class ResearchBuilding(building):
     worker_cost = 6
     max_worker_capacity = 10
     volume = 350
+    required_professions = {"Engineer": (1, 6), "Biologist": (1, 4)}
 
     # Default inputs required for one research point; callers can supply another recipe.
     DEFAULT_RESOURCE_COSTS = {
@@ -523,7 +630,7 @@ class ResearchBuilding(building):
         """Spend the full recipe and add research points, or leave stocks unchanged."""
         if amount < 0:
             raise ValueError("Research amount must be non-negative")
-        if not self.is_on or amount == 0:
+        if not self.is_operational() or amount == 0:
             return 0
 
         research_inventory = resource_inventory.research
@@ -545,3 +652,146 @@ class ResearchBuilding(building):
 
         research_inventory.addResources(amount)
         return amount
+
+
+class University(building):
+    """Trains workers into professions and produces a modest amount of research."""
+
+    maintenance_cost = 30
+    production_cost = 1800
+    worker_cost = 7
+    max_worker_capacity = 8
+    volume = 450
+    required_professions = {"Doctor": (1, 3), "Biologist": (1, 5)}
+
+    RESEARCH_RESOURCE_COSTS = {"electricity": 10, "food": 2}
+    RESEARCH_OUTPUT_PER_TURN = 1
+    TRAINING_RESEARCH_COST = 5
+    TRAINING_RESOURCE_COSTS = {"electricity": 20, "food": 5}
+    TRAINABLE_PROFESSIONS = {
+        "Biologist",
+        "Doctor",
+        "Engineer",
+        "Pilot",
+        "Geologist",
+    }
+
+    def __init__(
+        self,
+        name: str,
+        safety_rating: int | float = 0,
+        number_of_workers: int = 0,
+    ):
+        """Create a university with configurable class-level research recipes."""
+        super().__init__(name, safety_rating, number_of_workers)
+
+    @staticmethod
+    def _consume_resources(resource_costs: dict[str, int | float]) -> bool:
+        """Consume a recipe only when every required colony inventory can pay it."""
+        inventories = {
+            resource_name: getattr(resource_inventory, resource_name)
+            for resource_name in resource_costs
+        }
+        if any(
+            inventory.getResources() < amount
+            for resource_name, inventory in inventories.items()
+            for amount in (resource_costs[resource_name],)
+        ):
+            return False
+        for resource_name, amount in resource_costs.items():
+            inventories[resource_name].SubtractResources(amount)
+        return True
+
+    def produce_research(self) -> int | float:
+        """Spend the research recipe and add one point when the university can operate."""
+        if not self.is_operational():
+            return 0
+        if not self._consume_resources(self.RESEARCH_RESOURCE_COSTS):
+            return 0
+        resource_inventory.research.addResources(self.RESEARCH_OUTPUT_PER_TURN)
+        return self.RESEARCH_OUTPUT_PER_TURN
+
+    def train_worker(self, worker: BuildingWorker, profession_name: str) -> bool:
+        """Train an available worker in a profession, charging research and resources."""
+        if not self.is_operational():
+            return False
+        if not worker.isAvailable():
+            raise ValueError("Worker must be available to receive training")
+        if profession_name not in self.TRAINABLE_PROFESSIONS:
+            raise ValueError(f"Unsupported profession: {profession_name}")
+
+        profession_type = type(worker.getType())
+        profession = getattr(profession_type, profession_name, None)
+        if profession is None:
+            raise ValueError(f"Worker does not support profession: {profession_name}")
+        if resource_inventory.research.getResources() < self.TRAINING_RESEARCH_COST:
+            return False
+        if any(
+            getattr(resource_inventory, name).getResources() < amount
+            for name, amount in self.TRAINING_RESOURCE_COSTS.items()
+        ):
+            return False
+
+        # Check all costs before deducting any, so failed training spends nothing.
+        if not self._consume_resources(self.TRAINING_RESOURCE_COSTS):
+            return False
+        resource_inventory.research.SubtractResources(self.TRAINING_RESEARCH_COST)
+        worker.setProfession(profession)
+        return True
+
+
+class MedicalBay(building):
+    """Provides basic medical facilities staffed by a doctor."""
+
+    maintenance_cost = 18
+    production_cost = 1300
+    worker_cost = 5
+    max_worker_capacity = 8
+    volume = 250
+    patient_capacity = 4
+    required_professions = {"Doctor": (1, 8)}
+
+
+class Hospital(building):
+    """Provides a larger medical facility with expanded patient capacity."""
+
+    maintenance_cost = 35
+    production_cost = 2800
+    worker_cost = 8
+    max_worker_capacity = 16
+    volume = 600
+    patient_capacity = 20
+    required_professions = {"Doctor": (2, 12), "Biologist": (0, 4)}
+
+
+class Graveyard(building):
+    """Provides land reserved for burials."""
+
+    maintenance_cost = 5
+    production_cost = 300
+    worker_cost = 1
+    max_worker_capacity = 2
+    volume = 1000
+    burial_capacity = 100
+
+
+class CommunicationsHub(building):
+    """Coordinates colony communications and satellite links."""
+
+    maintenance_cost = 15
+    production_cost = 1200
+    worker_cost = 5
+    max_worker_capacity = 6
+    volume = 250
+    required_professions = {"Engineer": (1, 4), "Pilot": (0, 2)}
+
+
+class SatelliteDish(building):
+    """Provides an antenna for establishing a satellite communications link."""
+
+    maintenance_cost = 8
+    production_cost = 700
+    worker_cost = 3
+    max_worker_capacity = 3
+    volume = 80
+    required_professions = {"Engineer": (1, 2), "Pilot": (0, 1)}
