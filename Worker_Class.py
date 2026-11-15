@@ -4,12 +4,12 @@ from enum import Enum
 
 
 class Profession(Enum):
+    Doctor = 1
+    Engineer = 2
+    Biologist = 3
+    Geologist = 4
+    Pilot = 5
     Unassigned = 0
-    Biologist = 1
-    Doctor = 2
-    Engineer = 3
-    Pilot = 4
-    Geologist = 5
 
 
 class Worker:
@@ -20,6 +20,7 @@ class Worker:
         self.age: int = age          # in days
         self.health: float = 100.0   # in percentage
         self.Available: bool = True
+        self.retired: bool = False
         self.job: Profession = Profession.Unassigned
         Worker.TotalCount += 1
         Worker.AvailableCount += 1
@@ -36,7 +37,7 @@ class Worker:
         return self.health
 
     def isAvailable(self) -> bool:
-        return self.Available
+        return self.Available and not self.retired
 
     def getSkills(self) -> list[float]:
         return self.skills
@@ -63,6 +64,8 @@ class Worker:
         return False
 
     def SendToRest(self) -> bool:
+        if self.retired:
+            return False
         if not self.isAvailable():
             self.Available = True
             Worker.AvailableCount += 1
@@ -73,6 +76,8 @@ class Worker:
         return False
 
     def SendToHospital(self) -> None:
+        if self.retired:
+            return
         if self.isAvailable():
             self.Available = False
             Worker.AvailableCount -= 1
@@ -81,6 +86,8 @@ class Worker:
             self.health = 250.0
 
     def SendToStudy(self) -> None:
+        if self.retired:
+            return
         if self.isAvailable():
             self.Available = False
             Worker.AvailableCount -= 1
@@ -112,6 +119,7 @@ class Worker:
         if self.isAvailable():
             Worker.AvailableCount -= 1
         self.Available = False
+        self.retired = True
 
     def setType(self, N: int) -> None:
         if N == 1:
