@@ -41,7 +41,6 @@ from hazards import HazardManager
 from time_system import BUILDING_BASE_OUTPUTS, TimeEngine, advance_sol, advance_multiple_sols
 
 
-# Environment tuning is shared by colony instances; values affect the time simulation.
 SPACE_ENVIRONMENTS = {
     'orbit': {
         'label': 'Low Earth Orbit Station',
@@ -82,8 +81,6 @@ FoodFactory.storage_capacity = 50000
 
 
 class GameState:
-    """Keep the live colony simulation state and its supporting systems together."""
-
     def __init__(
         self,
         resource_pool: Dict[str, Any],
@@ -91,8 +88,6 @@ class GameState:
         buildings: List[Any],
         space_key: str = 'mars',
     ):
-        """Initialize resources, people, buildings, location, time, hazards, and logs."""
-        # Ensure research exists in both the resource module and this state's pool.
         if not hasattr(resource_inventory, 'research'):
             resource_inventory.research = resource_inventory.resources(0, 10000)
         if 'research' not in resource_pool:
@@ -115,7 +110,6 @@ class GameState:
 'Resource management'
 
 def get_resource(state: GameState, name: str) -> float:
-    """Read a resource amount, returning zero when the colony lacks that resource."""
     res = state.resources.get(name)
     if res is None:
         return 0.0
@@ -123,12 +117,10 @@ def get_resource(state: GameState, name: str) -> float:
 
 
 def has_resource(state: GameState, name: str, amount: float) -> bool:
-    """Check whether the colony currently holds at least the requested amount."""
     return get_resource(state, name) >= amount
 
 
 def spend_resource(state: GameState, name: str, amount: float) -> bool:
-    """Subtract a resource amount when that resource exists and has enough stock."""
     res = state.resources.get(name)
     if res is None:
         return False
@@ -136,7 +128,6 @@ def spend_resource(state: GameState, name: str, amount: float) -> bool:
 
 
 def add_resource(state: GameState, name: str, amount: float) -> bool:
-    """Add to a known resource inventory and report whether it was found."""
     res = state.resources.get(name)
     if res is None:
         return False
@@ -145,7 +136,6 @@ def add_resource(state: GameState, name: str, amount: float) -> bool:
 
 
 def expand_resource_max(state: GameState, name: str, amount: float) -> bool:
-    """Increase a known resource inventory's storage capacity."""
     res = state.resources.get(name)
     if res is None:
         return False
@@ -154,7 +144,6 @@ def expand_resource_max(state: GameState, name: str, amount: float) -> bool:
 
 
 def _spend_bundle(state: GameState, costs: Dict[str, float]) -> bool:
-    """Check every input first, then deduct the full recipe without partial spending."""
     for name, amount in costs.items():
         if not has_resource(state, name, amount):
             return False
@@ -164,7 +153,6 @@ def _spend_bundle(state: GameState, costs: Dict[str, float]) -> bool:
 
 
 def _get_worker(state: GameState, worker_index: int) -> Any:
-    """Return a living, non-retired worker by index or record why lookup failed."""
     if not (0 <= worker_index < len(state.workers)):
         state.log.append('Invalid worker index.')
         return None
@@ -176,7 +164,6 @@ def _get_worker(state: GameState, worker_index: int) -> Any:
 
 
 def _get_available_worker(state: GameState, worker_index: int) -> Any:
-    """Return an active worker only if they are currently available for an action."""
     worker = _get_worker(state, worker_index)
     if worker is None:
         return None
@@ -191,7 +178,6 @@ def _get_available_worker(state: GameState, worker_index: int) -> Any:
 
 
 def _worker_efficiency(worker: Any, preferred_job: str = '') -> float:
-    """Combine role skill, debuffs, health, and a matching-profession bonus."""
     role_index = {
         'Unassigned': 0,
         'Doctor': 1,
@@ -211,7 +197,6 @@ def _worker_efficiency(worker: Any, preferred_job: str = '') -> float:
 
 
 def _damage_worker(worker: Any, amount: float) -> None:
-    """Apply damage and explicitly mark a defeated worker unavailable."""
     if not worker.takeDamage(amount):
         worker.health = 0.0
         worker.Available = False
@@ -220,7 +205,6 @@ def _damage_worker(worker: Any, amount: float) -> None:
 'Worker actions'
 
 def assign_worker_job(state: GameState, worker_index: int, profession_code: int) -> bool:
-    """Change a worker's profession, unstaffing them first if necessary."""
     worker = _get_worker(state, worker_index)
     if worker is None:
         return False
@@ -238,7 +222,6 @@ def assign_worker_job(state: GameState, worker_index: int, profession_code: int)
 
 
 def send_worker_to_work(state: GameState, worker_index: int) -> bool:
-    """Run a general shift that converts worker efficiency into electricity."""
     worker = _get_available_worker(state, worker_index)
     if worker is None:
         return False
@@ -252,7 +235,6 @@ def send_worker_to_work(state: GameState, worker_index: int) -> bool:
 
 
 def send_worker_to_rest(state: GameState, worker_index: int) -> bool:
-    """Rest an unstaffed worker and reduce each of their debuffs."""
     worker = _get_worker(state, worker_index)
     if worker is None:
         return False
@@ -267,7 +249,6 @@ def send_worker_to_rest(state: GameState, worker_index: int) -> bool:
 
 
 def send_worker_to_hospital(state: GameState, worker_index: int) -> bool:
-    """Spend water and electricity to heal a worker and reduce their debuffs."""
     worker = _get_available_worker(state, worker_index)
     if worker is None:
         return False
@@ -282,7 +263,6 @@ def send_worker_to_hospital(state: GameState, worker_index: int) -> bool:
 
 
 def send_worker_to_study(state: GameState, worker_index: int) -> bool:
-    """Spend electricity to study and improve the worker's profession skill."""
     worker = _get_available_worker(state, worker_index)
     if worker is None:
         return False
@@ -305,7 +285,6 @@ def send_worker_to_study(state: GameState, worker_index: int) -> bool:
 
 
 def train_worker_university(state: GameState, building_index: int, worker_index: int, profession_name: str) -> bool:
-    """Validate indices and delegate profession training to a University."""
     if not (0 <= building_index < len(state.buildings)):
         state.log.append('Invalid building index.')
         return False
@@ -330,7 +309,6 @@ def train_worker_university(state: GameState, building_index: int, worker_index:
 
 
 def retire_worker(state: GameState, worker_index: int) -> bool:
-    """Unstaff and permanently retire a selected worker."""
     worker = _get_worker(state, worker_index)
     if worker is None:
         return False
@@ -350,7 +328,6 @@ def retire_worker(state: GameState, worker_index: int) -> bool:
 'Life support and farming actions'
 
 def run_moxie(state: GameState, worker_index: int) -> bool:
-    """Consume electricity and carbon dioxide to produce oxygen with a worker."""
     worker = _get_available_worker(state, worker_index)
     if worker is None:
         return False
@@ -367,7 +344,6 @@ def run_moxie(state: GameState, worker_index: int) -> bool:
 
 
 def balance_atmosphere(state: GameState) -> bool:
-    """Spend water and electricity to adjust the colony's atmospheric resources."""
     if not _spend_bundle(state, {'water': 10.0, 'electricity': 20.0}):
         state.log.append('Atmosphere processor needs 10 water and 20 electricity.')
         return False
@@ -380,7 +356,6 @@ def balance_atmosphere(state: GameState) -> bool:
 
 
 def run_hydroponics(state: GameState, worker_index: int, crop_name: str) -> bool:
-    """Spend seeds, water, and electricity to grow a crop and produce oxygen."""
     crop_map = {
         'lettuce': ('seed_Lettuce', 'lettuce'),
         'wheat': ('seed_Wheat', 'wheat'),
@@ -412,7 +387,6 @@ def run_hydroponics(state: GameState, worker_index: int, crop_name: str) -> bool
 
 
 def run_food_refinery(state: GameState, worker_index: int, crop_name: str) -> bool:
-    """Convert harvested crops to food, or flax to plastic, using a worker."""
     key = crop_name.strip().lower()
     if key not in {'lettuce', 'wheat', 'sunflower', 'flax'}:
         state.log.append(f'Cannot refine {crop_name}.')
@@ -441,7 +415,6 @@ def run_food_refinery(state: GameState, worker_index: int, crop_name: str) -> bo
 
 
 def feed_crew(state: GameState) -> bool:
-    """Consume food and water per active worker; ration shortages cause damage."""
     active = [w for w in state.workers if not getattr(w, 'retired', False) and w.getHealth() > 0]
     if not active:
         return False
@@ -464,7 +437,6 @@ def feed_crew(state: GameState) -> bool:
 'Mining and manufacturing actions'
 
 def mine_resources(state: GameState, worker_index: int) -> bool:
-    """Use a geologist's shift and supplies to gather raw materials and science."""
     worker = _get_available_worker(state, worker_index)
     if worker is None:
         return False
@@ -490,7 +462,6 @@ def mine_resources(state: GameState, worker_index: int) -> bool:
 
 
 def refine_materials(state: GameState, worker_index: int, material_name: str) -> bool:
-    """Apply a material recipe and convert inputs into refined building materials."""
     key = material_name.strip().lower()
     recipes = {
         'glass': ({'dirt': 15.0, 'electricity': 15.0}, 'glass', 8.0),
@@ -518,7 +489,6 @@ def refine_materials(state: GameState, worker_index: int, material_name: str) ->
 
 
 def produce_fuel(state: GameState, worker_index: int) -> bool:
-    """Synthesize fuel and water from carbon dioxide, hydrogen, and electricity."""
     worker = _get_available_worker(state, worker_index)
     if worker is None:
         return False
@@ -537,7 +507,6 @@ def produce_fuel(state: GameState, worker_index: int) -> bool:
 
 
 def manufacture_item(state: GameState, worker_index: int, item_name: str) -> bool:
-    """Check a blueprint, consume its materials, and add one manufactured item."""
     key = item_name.strip().lower()
     blueprints = {
         'drones': {'aluminum': 15.0, 'plastic': 10.0, 'glass': 5.0, 'electricity': 20.0},
@@ -566,7 +535,6 @@ def manufacture_item(state: GameState, worker_index: int, item_name: str) -> boo
 'Building and factory actions'
 
 def build_from_catalog(building_key: str) -> Any:
-    """Create the building associated with a catalog key, or return None if unknown."""
     key = building_key.strip().lower()
     catalog = {
         'power': lambda: PowerPlant('Solar Power Plant', safety_rating=95),
@@ -612,7 +580,6 @@ def build_from_catalog(building_key: str) -> Any:
 
 
 def construct_building(state: GameState, new_building: Any) -> bool:
-    """Pay construction inputs, add the building, and expand selected colony storage."""
     if isinstance(new_building, str):
         resolved = build_from_catalog(new_building)
         if resolved is None:
@@ -634,7 +601,6 @@ def construct_building(state: GameState, new_building: Any) -> bool:
 
 
 def toggle_building(state: GameState, building_index: int) -> bool:
-    """Switch a colony building between its on and off states."""
     if not (0 <= building_index < len(state.buildings)):
         state.log.append('Invalid building index.')
         return False
@@ -649,7 +615,6 @@ def toggle_building(state: GameState, building_index: int) -> bool:
 
 
 def assign_building_worker(state: GameState, building_index: int, worker_index: int) -> bool:
-    """Assign a compatible available worker to a building and record the assignment."""
     if not (0 <= building_index < len(state.buildings)):
         state.log.append('Invalid building index.')
         return False
@@ -668,7 +633,6 @@ def assign_building_worker(state: GameState, building_index: int, worker_index: 
 
 
 def unassign_building_worker(state: GameState, building_index: int, worker_index: int) -> bool:
-    """Remove a worker from a building and return them to the available workforce."""
     if not (0 <= building_index < len(state.buildings)):
         state.log.append('Invalid building index.')
         return False
@@ -687,7 +651,6 @@ def unassign_building_worker(state: GameState, building_index: int, worker_index
 
 
 def operate_factory(state: GameState, factory_index: int, worker_indices: List[int]) -> bool:
-    """Run a staffed production building with a manual crew and safety-based risk."""
     if not (0 <= factory_index < len(state.buildings)):
         state.log.append('Invalid building index.')
         return False
@@ -729,7 +692,6 @@ def operate_factory(state: GameState, factory_index: int, worker_indices: List[i
 
 
 def maintain_buildings(state: GameState) -> bool:
-    """Spend maintenance supplies and improve each building's safety rating."""
     if not state.buildings:
         state.log.append('No buildings to maintain.')
         return False
@@ -750,7 +712,6 @@ def maintain_buildings(state: GameState) -> bool:
 
 
 def run_research_lab(state: GameState, building_index: int, points: int = 1) -> bool:
-    """Run an operational research lab and convert its output to science points."""
     if not (0 <= building_index < len(state.buildings)):
         state.log.append('Invalid building index.')
         return False
@@ -771,7 +732,6 @@ def run_research_lab(state: GameState, building_index: int, points: int = 1) -> 
 
 
 def transfer_logistics(state: GameState) -> bool:
-    """Use operational logistics hubs to move local producer stock to colony stores."""
     resource_buildings = [b for b in state.buildings if isinstance(b, ResourceBuilding)]
     hubs = [b for b in state.buildings if isinstance(b, LogisticsBuilding) and b.is_operational()]
     if not hubs:
@@ -793,7 +753,6 @@ def transfer_logistics(state: GameState) -> bool:
 'Vehicle, mission, and crisis actions'
 
 def deploy_rover(state: GameState, worker_index: int) -> bool:
-    """Spend rover mission supplies to gain science and collected dirt."""
     if not has_resource(state, 'rovers', 1):
         state.log.append('No rovers available.')
         return False
@@ -815,7 +774,6 @@ def deploy_rover(state: GameState, worker_index: int) -> bool:
 
 
 def fly_drone(state: GameState, worker_index: int) -> bool:
-    """Spend drone mission supplies to gain science and discover crop seeds."""
     if not has_resource(state, 'drones', 1):
         state.log.append('No drones available.')
         return False
@@ -837,7 +795,6 @@ def fly_drone(state: GameState, worker_index: int) -> bool:
 
 
 def launch_satellite(state: GameState, worker_index: int) -> bool:
-    """Consume a satellite, rocket, fuel, and power to launch and gain science."""
     worker = _get_available_worker(state, worker_index)
     if worker is None:
         return False
@@ -855,7 +812,6 @@ def launch_satellite(state: GameState, worker_index: int) -> bool:
 
 
 def launch_rocket(state: GameState, worker_index: int) -> bool:
-    """Spend launch supplies and reward the colony with research and resupply."""
     worker = _get_available_worker(state, worker_index)
     if worker is None:
         return False
@@ -874,7 +830,6 @@ def launch_rocket(state: GameState, worker_index: int) -> bool:
 
 
 def resolve_crises(state: GameState) -> bool:
-    """Ask each active incident whether current resources and specialists resolve it."""
     if not state.hazard_manager.active_incidents:
         state.log.append('No active crises to resolve.')
         return False
@@ -891,10 +846,7 @@ def resolve_crises(state: GameState) -> bool:
 'Action router'
 
 class ActionRouter:
-    """Map external action names to their functions and execute them for a state."""
-
     def __init__(self, state: GameState):
-        """Register the supported worker, building, mission, and time actions."""
         self.state = state
         self.routes: Dict[str, Callable[..., Any]] = {
             'assign_job': assign_worker_job,
@@ -931,11 +883,9 @@ class ActionRouter:
         }
 
     def available_actions(self) -> List[str]:
-        """List the action names accepted by this router."""
         return list(self.routes.keys())
 
     def execute(self, action_name: str, *args: Any, **kwargs: Any) -> Any:
-        """Run a named action with the router's game state as its first argument."""
         action = self.routes.get(action_name)
         if action is None:
             raise ValueError(f'Unknown action: {action_name}')
