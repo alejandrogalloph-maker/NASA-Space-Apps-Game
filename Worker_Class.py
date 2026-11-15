@@ -61,15 +61,6 @@ class Worker:
         else:
             raise ValueError('Invalid profession')
 
-    def __del__(self):
-        try:
-            if self.health > 0 and not self.retired:
-                Worker.TotalCount = max(0, Worker.TotalCount - 1)
-                if self.Available:
-                    Worker.AvailableCount = max(0, Worker.AvailableCount - 1)
-        except Exception:
-            pass
-
     def SendToWork(self) -> bool:
         if self.isAvailable():
             self.Available = False
@@ -87,7 +78,7 @@ class Worker:
         H = random.random()
         if self.health + H < 120.0:
             self.health += H
-        return False
+        return True
 
     def SendToHospital(self) -> None:
         if self.retired or self.health <= 0:

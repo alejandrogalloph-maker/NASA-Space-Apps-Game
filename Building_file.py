@@ -70,11 +70,12 @@ class building:
         self.maintenance_cost = building_type.maintenance_cost
         self.production_cost = building_type.production_cost
         self.worker_cost = building_type.worker_cost
+        if not 0 <= safety_rating <= 100:
+            raise ValueError("safety_rating must be between 0 and 100")
         self.safety_rating = safety_rating
         self.workers: list[BuildingWorker] = []
         # Buildings begin operational; turning one off does not clear its storage.
         self.is_on = True
-        all_buildings.append(self)
 
     @property
     def number_of_workers(self) -> int:
@@ -869,7 +870,7 @@ def process_building_resources(
 ) -> list[tuple[building, bool]]:
     """Charge each building its operating or lower standby recipe once.
 
-    With no argument, process every building registered at construction time.
+    With no argument, process every building registered with the colony.
     Each result pairs a building with whether its complete recipe was paid;
     insufficient resources leave that building's inventories unchanged.
     """

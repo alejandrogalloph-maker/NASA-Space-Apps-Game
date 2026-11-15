@@ -38,7 +38,7 @@ from Building_file import (
     SatelliteDish,
 )
 from hazards import HazardManager
-from time_system import BUILDING_BASE_OUTPUTS, TimeEngine, advance_sol, advance_multiple_sols
+from time_system import base_output_for, TimeEngine, advance_sol, advance_multiple_sols
 
 
 SPACE_ENVIRONMENTS = {
@@ -88,12 +88,20 @@ class GameState:
         buildings: List[Any],
         space_key: str = 'mars',
     ):
-        if not hasattr(resource_inventory, 'research'):
-            resource_inventory.research = resource_inventory.resources(0, 10000)
-        if 'research' not in resource_pool:
-            resource_pool['research'] = resource_inventory.research
+        # The pool must share the module-level inventories that buildings use.
+        for name, inventory in vars(resource_inventory).items():
+            if isinstance(inventory, resource_inventory.resources):
+                existing = resource_pool.setdefault(name, inventory)
+                if existing is not inventory:
+                    raise ValueError(
+                        f"resource_pool['{name}'] is not the shared inventory in "
+                        "Resource_Class; buildings and actions would disagree"
+                    )
 
         self.resources = resource_pool
+        for b in buildings:
+            if b not in all_buildings:
+                all_buildings.append(b)
         self.workers = workers
         self.buildings = buildings
         self.space_key = space_key if space_key in SPACE_ENVIRONMENTS else 'mars'
@@ -589,11 +597,11 @@ def construct_building(state: GameState, new_building: Any) -> bool:
     power_cost = round(float(getattr(new_building, 'production_cost', 500)) * 0.05, 1)
     costs = {'electricity': power_cost, 'steel': 20.0, 'aluminum': 20.0}
     if not _spend_bundle(state, costs):
-        if new_building in all_buildings:
-            all_buildings.remove(new_building)
         state.log.append(f'Need {power_cost} electricity, 20 steel, and 20 aluminum to build {new_building.name}.')
         return False
     state.buildings.append(new_building)
+    if new_building not in all_buildings:
+        all_buildings.append(new_building)
     for storage_key in ('water', 'oxigen', 'electricity', 'food'):
         expand_resource_max(state, storage_key, 250.0)
     state.log.append(f'Constructed {new_building.name} (+250 storage caps). Assign required workers with staff_building.')
@@ -681,8 +689,7 @@ def operate_factory(state: GameState, factory_index: int, worker_indices: List[i
         worker.SendToWork()
         damage = 8.0 if random.random() > safety_ratio else 2.0
         _damage_worker(worker, damage)
-    cls_name = type(facility).__name__
-    base_out = BUILDING_BASE_OUTPUTS.get(cls_name, 10.0)
+    base_out = base_output_for(facility)
     storage = facility._get_storage(facility.resource_attribute)
     prev = storage.getResources()
     storage.addResources(round(base_out * avg_eff, 1))
@@ -703,10 +710,7 @@ def maintain_buildings(state: GameState) -> bool:
         return False
     for bld in state.buildings:
         if hasattr(bld, 'safety_rating'):
-            if bld.safety_rating <= 1.0:
-                bld.safety_rating = min(1.0, round(bld.safety_rating + 0.04, 2))
-            else:
-                bld.safety_rating = min(100, bld.safety_rating + 4)
+            bld.safety_rating = min(100, bld.safety_rating + 4)
     state.log.append(f'Maintained {len(state.buildings)} buildings.')
     return True
 

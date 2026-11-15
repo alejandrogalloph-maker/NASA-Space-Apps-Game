@@ -72,3 +72,6 @@ lettuce = resources()
 wheat = resources()
 flax = resources()
 sunflower = resources()
+
+# Created here so it exists before any building or GameState uses it.
+research = resources(0, 10000)

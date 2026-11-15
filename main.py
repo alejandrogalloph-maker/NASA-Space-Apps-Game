@@ -66,10 +66,10 @@ def choose_mission_setup() -> tuple[str, int, int, float]:
     except ValueError:
         target_sci = 500.0
 
-    print('\\n======================================================')
+    print('\n======================================================')
     print('                 MISSION AUTHORIZED                   ')
     print(f' Target: Survive {target_sols} Sols and reach {target_sci} Science.')
-    print('======================================================\\n')
+    print('======================================================\n')
     return selected_space, crew_count, target_sols, target_sci
 
 
@@ -143,7 +143,7 @@ def print_mission_report(state: GameState, target_sols: int, target_sci: float) 
     survival_rate = (len(active_crew) / total_crew) * 100 if total_crew else 0
     sci = state.science_points
 
-    print('\\n======================================================')
+    print('\n======================================================')
     print('                 POST-MISSION ANALYSIS                ')
     print('======================================================')
     if not active_crew:
@@ -160,7 +160,7 @@ def print_mission_report(state: GameState, target_sols: int, target_sci: float) 
     print(f'Science: {sci:.1f} / {target_sci:.1f}')
     print(f'Crew Survival: {len(active_crew)}/{total_crew} ({survival_rate:.0f}%)')
     print(f'Final Colony Safety Rating: {sum(b.safety_rating for b in state.buildings)/max(1, len(state.buildings)):.1f}%')
-    print('======================================================\\n')
+    print('======================================================\n')
 
 
 def show_status(state: GameState, target_sols: int, target_sci: float) -> None:
@@ -225,7 +225,7 @@ def show_status(state: GameState, target_sols: int, target_sci: float) -> None:
         cap = getattr(type(bld), 'max_worker_capacity', 0)
         vol = getattr(bld, 'volume', 100)
         raw_safety = float(getattr(bld, 'safety_rating', 0))
-        safety_pct = int(raw_safety * 100) if raw_safety <= 1.0 else int(raw_safety)
+        safety_pct = int(raw_safety)
         local_txt = ''
         if isinstance(bld, ResourceBuilding):
             items = [f'{k}:{v.getResources():.1f}/{v.getMaxResources():.0f}' for k, v in bld.storage.items()]

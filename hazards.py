@@ -162,10 +162,7 @@ class MeteorStrike(Incident):
         """Reduce one building's safety and vent some of the stored oxygen."""
         if state.buildings:
             target = random.choice(state.buildings)
-            if target.safety_rating > 1.0:
-                target.safety_rating = max(10, target.safety_rating - 35)
-            else:
-                target.safety_rating = max(0.10, round(target.safety_rating - 0.35, 2))
+            target.safety_rating = max(10, target.safety_rating - 35)
             state.log.append(f'Meteor Strike: {target.name} took heavy structural damage.')
         o2 = state.resources.get('oxigen')
         if o2 is not None:
@@ -240,8 +237,7 @@ class HazardManager:
         if state.buildings:
             safety_values = []
             for bld in state.buildings:
-                sr = float(getattr(bld, 'safety_rating', 95))
-                safety_values.append(sr / 100.0 if sr > 1.0 else sr)
+                safety_values.append(float(getattr(bld, 'safety_rating', 95)) / 100.0)
             avg_safety = sum(safety_values) / len(safety_values)
         else:
             avg_safety = 1.0

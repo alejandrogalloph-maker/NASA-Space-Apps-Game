@@ -1,287 +1,195 @@
-import math
-import random
-from typing import Any, List
+"""Sol-by-sol simulation: building production, upkeep, life support, hazards.
+
+This module must not import ``actions`` at module level, because ``actions``
+imports this file. ``feed_crew`` is imported lazily inside ``advance_sol``.
+"""
+
+from typing import Any, Dict, List
+
+import Resource_Class as resource_inventory
+from Building_file import LogisticsBuilding, PowerPlant, ResourceBuilding
+
+HOURS_PER_SOL = 24
+
+# Units a fully effective building adds to its local storage per sol.
+# Looked up by class name, walking up the inheritance chain (IceMinor -> WaterExtractor).
+BUILDING_BASE_OUTPUTS: Dict[str, float] = {
+    "WaterExtractor": 60.0,
+    "OxygenGenerator": 25.0,
+    "CarbonDioxideGenerator": 15.0,
+    "NitrogenGenerator": 20.0,
+    "HydrogenGenerator": 15.0,
+    "FoodFactory": 22000.0,
+    "PowerPlant": 220.0,
+    "FuelRefinery": 40.0,
+    "AluminumMine": 30.0,
+    "SteelMill": 25.0,
+    "SoilProcessor": 50.0,
+    "PlasticFactory": 20.0,
+    "GlassFactory": 20.0,
+    "CarFactory": 0.25,
+    "TruckFactory": 0.2,
+    "RoverFactory": 0.2,
+    "SatelliteFactory": 0.15,
+    "RocketFactory": 0.1,
+    "DroneFactory": 0.4,
+    "Farm": 15.0,
+}
+
+CREW_OXYGEN_PER_SOL = 1.0
+CREW_CO2_PER_SOL = 1.0
+SUFFOCATION_DAMAGE = 8.0
 
 
-class Incident:
-    """Base state and hooks shared by all colony incidents."""
+class TimeEngine:
+    """Tracks elapsed mission time."""
 
-    def __init__(self, name: str, description: str, severity: int):
-        """Store incident details and initialize its unresolved state."""
-        self.name = name
-        self.description = description
-        self.severity = severity
-        self.turns_active = 0
-        self.resolved = False
+    def __init__(self) -> None:
+        self.elapsed_hours: int = 0
 
-    def trigger(self, state: Any) -> None:
-        """Report the incident and apply its immediate effect to the colony."""
-        state.log.append(f'CRITICAL INCIDENT [Severity {self.severity}]: {self.name} - {self.description}')
-        self.apply_initial_effect(state)
-
-    def apply_initial_effect(self, state: Any) -> None:
-        """Hook for incident-specific effects applied once when it begins."""
-        pass
-
-    def apply_ongoing_penalty(self, state: Any) -> None:
-        """Advance the incident duration; subclasses may also apply ongoing damage."""
-        self.turns_active += 1
-
-    def check_resolution(self, state: Any) -> bool:
-        """Hook for incident-specific resolution requirements."""
-        return True
+    def advance(self, hours: int = HOURS_PER_SOL) -> None:
+        self.elapsed_hours += hours
 
 
-class PowerGridFailure(Incident):
-    """Disrupts power and requires materials and engineers to repair the grid."""
-
-    def __init__(self):
-        super().__init__(
-            'Grid Overload',
-            'Power plants tripped offline. Need 50 aluminum and 2 ready Engineers to repair.',
-            2,
-        )
-
-    def apply_initial_effect(self, state: Any) -> None:
-        """Drain part of stored electricity and switch off power plants."""
-        elec = state.resources.get('electricity')
-        if elec is not None:
-            loss = round(min(150.0, elec.getResources() * 0.35), 1)
-            elec.SubtractResources(loss)
-            state.log.append(f'Grid Failure: Lost {loss} kWh from main capacitors.')
-        for bld in state.buildings:
-            if type(bld).__name__ == 'PowerPlant' and getattr(bld, 'is_on', True):
-                bld.turn_off()
-
-    def apply_ongoing_penalty(self, state: Any) -> None:
-        """Increase the power drain each turn the failure remains unresolved."""
-        self.turns_active += 1
-        elec = state.resources.get('electricity')
-        if elec is not None:
-            drain = round(min(15.0 * self.turns_active, elec.getResources()), 1)
-            if drain > 0:
-                elec.SubtractResources(drain)
-                state.log.append(f'Ongoing Grid Instability: Drained {drain} kWh.')
-
-    def check_resolution(self, state: Any) -> bool:
-        """Repair the grid if aluminum and two available engineers are present."""
-        alum = state.resources.get('aluminum')
-        if alum is None or alum.getResources() < 50.0:
-            return False
-        engineers = [
-            w for w in state.workers
-            if not getattr(w, 'retired', False)
-            and w.getHealth() > 0
-            and w.getType().name == 'Engineer'
-            and w.isAvailable()
-        ]
-        if len(engineers) < 2:
-            return False
-        alum.SubtractResources(50.0)
-        for eng in engineers[:2]:
-            eng.SendToWork()
-            if not eng.takeDamage(5.0):
-                eng.health = 0.0
-                eng.Available = False
-        self.resolved = True
-        state.log.append('INCIDENT RESOLVED: Grid repaired by 2 Engineers (-50 aluminum). Turn PowerPlants back On.')
-        return True
+def base_output_for(facility: Any, default: float = 10.0) -> float:
+    """Base output of a building, resolved through its class hierarchy."""
+    for cls in type(facility).__mro__:
+        if cls.__name__ in BUILDING_BASE_OUTPUTS:
+            return BUILDING_BASE_OUTPUTS[cls.__name__]
+    return default
 
 
-class AmmoniaLeak(Incident):
-    """Damages living crew until a doctor seals the coolant leak."""
-
-    def __init__(self):
-        super().__init__(
-            'Ammonia Coolant Leak',
-            'Toxic vapor in life-support loop. Need 10 plastic, 15 water, and 1 ready Doctor.',
-            3,
-        )
-
-    def apply_initial_effect(self, state: Any) -> None:
-        """Apply the initial toxic exposure to every active worker."""
-        active = [w for w in state.workers if not getattr(w, 'retired', False) and w.getHealth() > 0]
-        for w in active:
-            if not w.takeDamage(10.0):
-                w.health = 0.0
-                w.Available = False
-        state.log.append('Ammonia Leak: Active crew suffered 10 toxic exposure damage.')
-
-    def apply_ongoing_penalty(self, state: Any) -> None:
-        """Increase crew exposure damage with each unresolved turn."""
-        self.turns_active += 1
-        active = [w for w in state.workers if not getattr(w, 'retired', False) and w.getHealth() > 0]
-        dmg = round(4.0 * self.turns_active, 1)
-        for w in active:
-            if not w.takeDamage(dmg):
-                w.health = 0.0
-                w.Available = False
-        if active:
-            state.log.append(f'Ongoing Ammonia Toxicity: Active crew took {dmg} damage.')
-
-    def check_resolution(self, state: Any) -> bool:
-        """Seal the leak using plastic, water, and one available doctor."""
-        plastic = state.resources.get('plastic')
-        water = state.resources.get('water')
-        if plastic is None or water is None:
-            return False
-        if plastic.getResources() < 10.0 or water.getResources() < 15.0:
-            return False
-        doctors = [
-            w for w in state.workers
-            if not getattr(w, 'retired', False)
-            and w.getHealth() > 0
-            and w.getType().name == 'Doctor'
-            and w.isAvailable()
-        ]
-        if not doctors:
-            return False
-        plastic.SubtractResources(10.0)
-        water.SubtractResources(15.0)
-        doc = doctors[0]
-        doc.SendToWork()
-        if not doc.takeDamage(4.0):
-            doc.health = 0.0
-            doc.Available = False
-        self.resolved = True
-        state.log.append('INCIDENT RESOLVED: Ammonia loop sealed and crew stabilized (-10 plastic, -15 water).')
-        return True
+def _active_crew(state: Any) -> List[Any]:
+    return [
+        w for w in state.workers
+        if not getattr(w, "retired", False) and w.getHealth() > 0
+    ]
 
 
-class MeteorStrike(Incident):
-    """Damages a random building and causes an oxygen leak."""
-
-    def __init__(self):
-        super().__init__(
-            'Micrometeorite Hull Breach',
-            'Structural hull puncture. Need 80 steel, 80 dirt, 1 ready Geologist, and 1 ready Engineer.',
-            3,
-        )
-
-    def apply_initial_effect(self, state: Any) -> None:
-        """Reduce one building's safety and vent some of the stored oxygen."""
-        if state.buildings:
-            target = random.choice(state.buildings)
-            if target.safety_rating > 1.0:
-                target.safety_rating = max(10, target.safety_rating - 35)
-            else:
-                target.safety_rating = max(0.10, round(target.safety_rating - 0.35, 2))
-            state.log.append(f'Meteor Strike: {target.name} took heavy structural damage.')
-        o2 = state.resources.get('oxigen')
-        if o2 is not None:
-            loss = round(min(40.0, o2.getResources() * 0.25), 1)
-            o2.SubtractResources(loss)
-            state.log.append(f'Hull Breach Decompression: Lost {loss} kg oxigen.')
-
-    def apply_ongoing_penalty(self, state: Any) -> None:
-        """Increase the oxygen leak each turn until the hull is repaired."""
-        self.turns_active += 1
-        o2 = state.resources.get('oxigen')
-        if o2 is not None:
-            leak = round(min(8.0 * self.turns_active, o2.getResources()), 1)
-            if leak > 0:
-                o2.SubtractResources(leak)
-                state.log.append(f'Ongoing Hull Leak: Venting {leak} kg oxigen.')
-
-    def check_resolution(self, state: Any) -> bool:
-        """Patch the breach using steel, dirt, a geologist, and an engineer."""
-        steel = state.resources.get('steel')
-        dirt = state.resources.get('dirt')
-        if steel is None or dirt is None:
-            return False
-        if steel.getResources() < 80.0 or dirt.getResources() < 80.0:
-            return False
-        geologists = [
-            w for w in state.workers
-            if not getattr(w, 'retired', False)
-            and w.getHealth() > 0
-            and w.getType().name == 'Geologist'
-            and w.isAvailable()
-        ]
-        engineers = [
-            w for w in state.workers
-            if not getattr(w, 'retired', False)
-            and w.getHealth() > 0
-            and w.getType().name == 'Engineer'
-            and w.isAvailable()
-        ]
-        if not geologists or not engineers:
-            return False
-        steel.SubtractResources(80.0)
-        dirt.SubtractResources(80.0)
-        geo = geologists[0]
-        eng = engineers[0]
-        geo.SendToWork()
-        eng.SendToWork()
-        if not geo.takeDamage(6.0):
-            geo.health = 0.0
-            geo.Available = False
-        if not eng.takeDamage(6.0):
-            eng.health = 0.0
-            eng.Available = False
-        self.resolved = True
-        state.log.append('INCIDENT RESOLVED: Hull breach patched with regolith concrete (-80 steel, -80 dirt).')
-        return True
+def _staff_factor(bld: Any) -> float:
+    """0.5-1.5x output from staffing level and staff health."""
+    cap = max(1, type(bld).max_worker_capacity)
+    staffing = 0.5 + 0.5 * (bld.number_of_workers / cap)
+    if not bld.workers:
+        return staffing
+    health = sum(max(0.25, min(1.5, w.getHealth() / 100.0)) for w in bld.workers)
+    return round(staffing * health / len(bld.workers), 3)
 
 
-class HazardManager:
-    """Calculate colony hazard risk and manage active incident lifecycles."""
+def _snapshot(state: Any) -> Dict[str, float]:
+    return {name: res.getResources() for name, res in state.resources.items()}
 
-    def __init__(self):
-        """Set up the incident list, available incident types, and risk score."""
-        self.active_incidents: List[Incident] = []
-        self.incident_pool = [PowerGridFailure, AmmoniaLeak, MeteorStrike]
-        self.last_risk_score: float = 0.0
 
-    def compute_risk_probability(self, state: Any) -> float:
-        """Combine environment, building safety/volume, and crew health into risk."""
-        base_risk = float(state.space.get('hazard_chance', 0.25)) * 0.45
+def _build_report(state: Any, before: Dict[str, float]) -> None:
+    report: Dict[str, Dict[str, float]] = {}
+    for name, res in state.resources.items():
+        net = round(res.getResources() - before.get(name, 0.0), 2)
+        if abs(net) < 1e-9:
+            continue
+        report[name] = {
+            "added": max(net, 0.0),
+            "subtracted": max(-net, 0.0),
+            "net": net,
+        }
+    state.daily_report = report
 
-        if state.buildings:
-            safety_values = []
-            for bld in state.buildings:
-                sr = float(getattr(bld, 'safety_rating', 95))
-                safety_values.append(sr / 100.0 if sr > 1.0 else sr)
-            avg_safety = sum(safety_values) / len(safety_values)
-        else:
-            avg_safety = 1.0
-        # Low average safety and larger active volume each increase exposure risk.
-        degradation_risk = max(0.0, (1.0 - avg_safety) * 0.50)
 
-        active_volume = sum(
-            float(getattr(b, 'volume', 100))
-            for b in state.buildings
-            if getattr(b, 'is_on', True)
-        )
-        exposure_risk = 0.04 * math.log1p(active_volume / 500.0)
+def _run_buildings(state: Any) -> None:
+    """Pay every building's inputs and let paid producers fill local storage."""
+    solar = float(state.space.get("solar_multiplier", 1.0))
+    # Power plants first so their output can be hauled before other upkeep.
+    ordered = sorted(state.buildings, key=lambda b: not isinstance(b, PowerPlant))
+    for bld in ordered:
+        was_operational = bld.is_operational()
+        paid = bld.consume_turn_resources()
+        if not paid:
+            if was_operational:
+                state.log.append(f"{bld.name} idle: not enough input resources.")
+            continue
+        if isinstance(bld, ResourceBuilding) and was_operational:
+            amount = base_output_for(bld) * _staff_factor(bld)
+            if isinstance(bld, PowerPlant):
+                amount *= solar
+            bld.produce(round(amount, 2))
 
-        active_crew = [w for w in state.workers if not getattr(w, 'retired', False) and w.getHealth() > 0]
-        if active_crew:
-            avg_hp = sum(w.getHealth() for w in active_crew) / len(active_crew)
-            fatigue_risk = max(0.0, (100.0 - avg_hp) / 400.0)
-        else:
-            fatigue_risk = 0.0
 
-        # Clamp the combined probability so every turn has a bounded risk.
-        total_prob = min(0.65, max(0.05, base_risk + degradation_risk + exposure_risk + fatigue_risk))
-        self.last_risk_score = round(total_prob, 3)
-        return total_prob
+def _run_logistics(state: Any) -> None:
+    sources = [b for b in state.buildings if isinstance(b, ResourceBuilding)]
+    for hub in state.buildings:
+        if isinstance(hub, LogisticsBuilding) and hub.is_operational():
+            hub.process_turn(sources)
 
-    def process_turn(self, state: Any) -> None:
-        """Resolve or penalize existing incidents, then possibly trigger another."""
-        for inc in list(self.active_incidents):
-            if inc.check_resolution(state):
-                self.active_incidents.remove(inc)
-            else:
-                inc.apply_ongoing_penalty(state)
-                state.log.append(f'ONGOING CRISIS: {inc.name} - {inc.description}')
 
-        risk_prob = self.compute_risk_probability(state)
-        # Avoid duplicate active incident types and cap simultaneous crises at two.
-        if len(self.active_incidents) < 2 and random.random() < risk_prob:
-            active_types = {type(i) for i in self.active_incidents}
-            candidates = [cls for cls in self.incident_pool if cls not in active_types]
-            if candidates:
-                new_crisis = random.choice(candidates)()
-                self.active_incidents.append(new_crisis)
-                new_crisis.trigger(state)
+def _environment_drain(state: Any) -> None:
+    """Heating/shielding power draw and atmosphere leaks scale with active volume."""
+    volume = sum(float(getattr(b, "volume", 100)) for b in state.buildings if b.is_on)
+    blocks = volume / 100.0
+    for res_name, key in (
+        ("electricity", "power_per_100m3"),
+        ("oxigen", "o2_leak_per_100m3"),
+        ("Nitrogen", "n2_leak_per_100m3"),
+    ):
+        inventory = state.resources.get(res_name)
+        if inventory is None:
+            continue
+        inventory.SubtractResources(min(inventory.getResources(), blocks * float(state.space.get(key, 0.0))))
+
+
+def _life_support(state: Any) -> None:
+    crew = _active_crew(state)
+    if not crew:
+        return
+    oxygen = state.resources.get("oxigen")
+    needed = len(crew) * CREW_OXYGEN_PER_SOL
+    if oxygen is not None:
+        have = oxygen.getResources()
+        oxygen.SubtractResources(min(have, needed))
+        if have < needed:
+            state.log.append(f"Oxygen shortage! Crew took {SUFFOCATION_DAMAGE} damage.")
+            for worker in crew:
+                worker.takeDamage(SUFFOCATION_DAMAGE)
+    co2 = state.resources.get("CO2")
+    if co2 is not None:
+        co2.addResources(len(crew) * CREW_CO2_PER_SOL)
+
+
+def _recover_workers(state: Any) -> None:
+    """Unassigned workers who worked, studied, or were treated are ready next sol."""
+    for worker in _active_crew(state):
+        if worker.assigned_building is None and not worker.Available:
+            worker.SendToRest()
+
+
+def advance_sol(state: Any) -> bool:
+    """Simulate one full sol. Returns False if there is no crew left to simulate."""
+    from actions import feed_crew  # lazy: actions imports this module
+
+    if not _active_crew(state):
+        state.log.append("No active crew; the colony is lost.")
+        return False
+
+    before = _snapshot(state)
+    state.log.append(f"--- Sol {state.sol} complete ---")
+
+    _run_buildings(state)
+    _run_logistics(state)
+    _environment_drain(state)
+    _life_support(state)
+    feed_crew(state)
+    state.hazard_manager.process_turn(state)
+    _recover_workers(state)
+
+    state.time_engine.advance(HOURS_PER_SOL)
+    state.sol += 1
+    _build_report(state, before)
+    return True
+
+
+def advance_multiple_sols(state: Any, count: int) -> bool:
+    """Advance up to ``count`` sols, stopping early if the crew is lost."""
+    advanced = 0
+    for _ in range(max(0, min(int(count), 365))):
+        if not advance_sol(state):
+            break
+        advanced += 1
+    return advanced > 0
