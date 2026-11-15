@@ -4,6 +4,9 @@ import Resource_Class as resource_inventory
 from typing import Protocol
 
 
+all_buildings: list["building"] = []
+
+
 class ProfessionLike(Protocol):
     """The profession name exposed by a worker's profession enum."""
 
@@ -36,6 +39,9 @@ class building:
     max_worker_capacity: int = 0
     # Role name maps to the minimum and maximum workers of that profession.
     required_professions: dict[str, tuple[int, int]] = {}
+    # Per-turn inputs while operating versus the lower standby draw while idle.
+    operating_resource_costs: dict[str, int | float] = {"electricity": 5}
+    standby_resource_costs: dict[str, int | float] = {"electricity": 1}
     # Physical volume in cubic meters; subclasses can override the default.
     volume: int | float = 100
 
@@ -68,6 +74,7 @@ class building:
         self.workers: list[BuildingWorker] = []
         # Buildings begin operational; turning one off does not clear its storage.
         self.is_on = True
+        all_buildings.append(self)
 
     @property
     def number_of_workers(self) -> int:
@@ -148,7 +155,9 @@ class building:
             f"Staffing: {{{staffing_info}}}, "
             f"Volume: {self.volume} m^3, "
             f"State: {'On' if self.is_on else 'Off'}, "
-            f"Operational: {self.is_operational()}"
+            f"Operational: {self.is_operational()}, "
+            f"Resource Costs: {type(self).operating_resource_costs} when operating, "
+            f"{type(self).standby_resource_costs} when idle"
         )
 
     def calculate_total_cost(self) -> int | float:
@@ -159,6 +168,29 @@ class building:
             + self.worker_cost * self.number_of_workers
             + sum(worker.getWage() for worker in self.workers)
         )
+
+    def consume_turn_resources(self) -> bool:
+        """Deduct this turn's inputs, or leave all inventories unchanged if short."""
+        recipe = (
+            type(self).operating_resource_costs
+            if self.is_operational()
+            else type(self).standby_resource_costs
+        )
+        inventories: dict[str, resource_inventory.resources] = {}
+        for resource_name, amount in recipe.items():
+            inventory = getattr(resource_inventory, resource_name, None)
+            if not isinstance(inventory, resource_inventory.resources):
+                raise ValueError(f"Unknown colony resource: {resource_name}")
+            if amount < 0:
+                raise ValueError("Resource costs must be non-negative")
+            inventories[resource_name] = inventory
+            if inventory.getResources() < amount:
+                return False
+
+        # Validate the entire recipe first so resources are never partly charged.
+        for resource_name, amount in recipe.items():
+            inventories[resource_name].SubtractResources(amount)
+        return True
 
     def turn_on(self) -> None:
         """Enable the building's operational behavior."""
@@ -227,6 +259,7 @@ class WaterExtractor(ResourceBuilding):
     worker_cost = 3
     max_worker_capacity = 5
     required_professions = {"Geologist": (1, 5)}
+    operating_resource_costs = {"electricity": 4, "fuel": 1}
 
 
 class OxygenGenerator(ResourceBuilding):
@@ -237,6 +270,7 @@ class OxygenGenerator(ResourceBuilding):
     worker_cost = 3
     max_worker_capacity = 4
     required_professions = {"Engineer": (1, 4)}
+    operating_resource_costs = {"electricity": 5, "water": 1}
 
 
 class CarbonDioxideGenerator(ResourceBuilding):
@@ -247,6 +281,7 @@ class CarbonDioxideGenerator(ResourceBuilding):
     worker_cost = 3
     max_worker_capacity = 3
     required_professions = {"Engineer": (1, 3)}
+    operating_resource_costs = {"electricity": 4}
 
 
 class NitrogenGenerator(ResourceBuilding):
@@ -257,6 +292,7 @@ class NitrogenGenerator(ResourceBuilding):
     worker_cost = 3
     max_worker_capacity = 4
     required_professions = {"Geologist": (1, 4)}
+    operating_resource_costs = {"electricity": 5}
 
 
 class HydrogenGenerator(ResourceBuilding):
@@ -267,6 +303,7 @@ class HydrogenGenerator(ResourceBuilding):
     worker_cost = 4
     max_worker_capacity = 5
     required_professions = {"Engineer": (1, 5)}
+    operating_resource_costs = {"electricity": 6, "water": 1}
 
 
 class FoodFactory(ResourceBuilding):
@@ -277,6 +314,7 @@ class FoodFactory(ResourceBuilding):
     worker_cost = 4
     max_worker_capacity = 8
     required_professions = {"Biologist": (1, 8)}
+    operating_resource_costs = {"electricity": 8, "water": 2}
 
 
 class PowerPlant(ResourceBuilding):
@@ -287,6 +325,7 @@ class PowerPlant(ResourceBuilding):
     worker_cost = 5
     max_worker_capacity = 8
     required_professions = {"Engineer": (1, 8)}
+    operating_resource_costs = {"fuel": 5, "water": 1}
 
 
 class FuelRefinery(ResourceBuilding):
@@ -297,6 +336,7 @@ class FuelRefinery(ResourceBuilding):
     worker_cost = 5
     max_worker_capacity = 8
     required_professions = {"Engineer": (1, 8)}
+    operating_resource_costs = {"electricity": 6, "water": 1}
 
 
 class AluminumMine(ResourceBuilding):
@@ -307,6 +347,7 @@ class AluminumMine(ResourceBuilding):
     worker_cost = 4
     max_worker_capacity = 8
     required_professions = {"Geologist": (1, 8)}
+    operating_resource_costs = {"electricity": 5, "fuel": 1}
 
 
 class SteelMill(ResourceBuilding):
@@ -317,6 +358,7 @@ class SteelMill(ResourceBuilding):
     worker_cost = 5
     max_worker_capacity = 10
     required_professions = {"Engineer": (1, 10)}
+    operating_resource_costs = {"electricity": 8, "aluminum": 2}
 
 
 class SoilProcessor(ResourceBuilding):
@@ -327,6 +369,7 @@ class SoilProcessor(ResourceBuilding):
     worker_cost = 3
     max_worker_capacity = 6
     required_professions = {"Geologist": (1, 6)}
+    operating_resource_costs = {"electricity": 4}
 
 
 class PlasticFactory(ResourceBuilding):
@@ -337,6 +380,7 @@ class PlasticFactory(ResourceBuilding):
     worker_cost = 5
     max_worker_capacity = 8
     required_professions = {"Engineer": (1, 8)}
+    operating_resource_costs = {"electricity": 6, "fuel": 1}
 
 
 class GlassFactory(ResourceBuilding):
@@ -347,6 +391,7 @@ class GlassFactory(ResourceBuilding):
     worker_cost = 4
     max_worker_capacity = 6
     required_professions = {"Engineer": (1, 6)}
+    operating_resource_costs = {"electricity": 6, "dirt": 1}
 
 
 class CarFactory(ResourceBuilding):
@@ -357,6 +402,7 @@ class CarFactory(ResourceBuilding):
     worker_cost = 6
     max_worker_capacity = 10
     required_professions = {"Engineer": (1, 10)}
+    operating_resource_costs = {"electricity": 8, "steel": 3, "plastic": 2}
 
 
 class TruckFactory(ResourceBuilding):
@@ -367,6 +413,7 @@ class TruckFactory(ResourceBuilding):
     worker_cost = 6
     max_worker_capacity = 12
     required_professions = {"Engineer": (1, 8), "Pilot": (0, 4)}
+    operating_resource_costs = {"electricity": 9, "steel": 4, "plastic": 1}
 
 
 class RoverFactory(ResourceBuilding):
@@ -377,6 +424,7 @@ class RoverFactory(ResourceBuilding):
     worker_cost = 7
     max_worker_capacity = 10
     required_professions = {"Engineer": (1, 8), "Pilot": (0, 2)}
+    operating_resource_costs = {"electricity": 10, "steel": 4, "plastic": 2}
 
 
 class SatelliteFactory(ResourceBuilding):
@@ -387,6 +435,7 @@ class SatelliteFactory(ResourceBuilding):
     worker_cost = 8
     max_worker_capacity = 12
     required_professions = {"Engineer": (1, 10), "Pilot": (0, 2)}
+    operating_resource_costs = {"electricity": 12, "aluminum": 4, "glass": 2}
 
 
 class RocketFactory(ResourceBuilding):
@@ -397,6 +446,7 @@ class RocketFactory(ResourceBuilding):
     worker_cost = 12
     max_worker_capacity = 20
     required_professions = {"Engineer": (2, 18), "Pilot": (0, 2)}
+    operating_resource_costs = {"electricity": 20, "steel": 8, "aluminum": 4, "fuel": 5}
 
 
 class DroneFactory(ResourceBuilding):
@@ -407,6 +457,7 @@ class DroneFactory(ResourceBuilding):
     worker_cost = 5
     max_worker_capacity = 10
     required_professions = {"Engineer": (1, 8), "Pilot": (0, 2)}
+    operating_resource_costs = {"electricity": 8, "aluminum": 1, "plastic": 2}
 
 
 class Farm(ResourceBuilding):
@@ -456,6 +507,7 @@ class Farm(ResourceBuilding):
     worker_cost = 3
     max_worker_capacity = 6
     required_professions = {"Biologist": (1, 6)}
+    operating_resource_costs = {"electricity": 3, "water": 2}
 
     def set_product_type(self, product_type: str) -> None:
         """Switch production between the selected crop's seeds and harvested crop."""
@@ -494,6 +546,7 @@ class Habitation(building):
     volume = 500
     resident_capacity = 20
     required_professions = {"Doctor": (1, 6)}
+    operating_resource_costs = {"electricity": 4, "oxigen": 1, "water": 2, "food": 2}
 
 
 class RecreationCenter(building):
@@ -505,6 +558,7 @@ class RecreationCenter(building):
     max_worker_capacity = 6
     volume = 250
     required_professions = {"Doctor": (1, 4), "Biologist": (0, 2)}
+    operating_resource_costs = {"electricity": 4, "food": 1}
 
 
 class Canteen(building):
@@ -516,6 +570,7 @@ class Canteen(building):
     max_worker_capacity = 8
     volume = 200
     required_professions = {"Biologist": (1, 8)}
+    operating_resource_costs = {"electricity": 4, "food": 3}
 
 
 class LogisticsBuilding(building):
@@ -528,6 +583,7 @@ class LogisticsBuilding(building):
     volume = 300
     transfer_amount: int | float = 100
     required_professions = {"Pilot": (1, 8)}
+    operating_resource_costs = {"electricity": 3, "fuel": 1}
 
     def __init__(
         self,
@@ -591,6 +647,7 @@ class ResearchBuilding(building):
     max_worker_capacity = 10
     volume = 350
     required_professions = {"Engineer": (1, 6), "Biologist": (1, 4)}
+    operating_resource_costs = {"electricity": 10, "aluminum": 2, "food": 1}
 
     # Default inputs required for one research point; callers can supply another recipe.
     DEFAULT_RESOURCE_COSTS = {
@@ -663,6 +720,7 @@ class University(building):
     max_worker_capacity = 8
     volume = 450
     required_professions = {"Doctor": (1, 3), "Biologist": (1, 5)}
+    operating_resource_costs = {"electricity": 8, "food": 2}
 
     RESEARCH_RESOURCE_COSTS = {"electricity": 10, "food": 2}
     RESEARCH_OUTPUT_PER_TURN = 1
@@ -750,6 +808,7 @@ class MedicalBay(building):
     volume = 250
     patient_capacity = 4
     required_professions = {"Doctor": (1, 8)}
+    operating_resource_costs = {"electricity": 4, "food": 1}
 
 
 class Hospital(building):
@@ -762,6 +821,7 @@ class Hospital(building):
     volume = 600
     patient_capacity = 20
     required_professions = {"Doctor": (2, 12), "Biologist": (0, 4)}
+    operating_resource_costs = {"electricity": 8, "food": 2}
 
 
 class Graveyard(building):
@@ -773,6 +833,7 @@ class Graveyard(building):
     max_worker_capacity = 2
     volume = 1000
     burial_capacity = 100
+    operating_resource_costs = {"electricity": 2}
 
 
 class CommunicationsHub(building):
@@ -784,6 +845,7 @@ class CommunicationsHub(building):
     max_worker_capacity = 6
     volume = 250
     required_professions = {"Engineer": (1, 4), "Pilot": (0, 2)}
+    operating_resource_costs = {"electricity": 6}
 
 
 class SatelliteDish(building):
@@ -795,3 +857,23 @@ class SatelliteDish(building):
     max_worker_capacity = 3
     volume = 80
     required_professions = {"Engineer": (1, 2), "Pilot": (0, 1)}
+    operating_resource_costs = {"electricity": 4}
+
+
+def process_building_resources(
+    buildings: list[building] | None = None,
+) -> list[tuple[building, bool]]:
+    """Charge each building its operating or lower standby recipe once.
+
+    With no argument, process every building registered at construction time.
+    Each result pairs a building with whether its complete recipe was paid;
+    insufficient resources leave that building's inventories unchanged.
+    """
+    selected_buildings = all_buildings if buildings is None else buildings
+    if any(not isinstance(item, building) for item in selected_buildings):
+        raise TypeError("All entries must be building instances")
+
+    return [
+        (item, item.consume_turn_resources())
+        for item in selected_buildings
+    ]
