@@ -825,6 +825,10 @@ class Hospital(building):
 
 
 class Graveyard(building):
+
+    """ Required profetions """
+    required_professions = {"Doctor": (0, 2)}
+    
     """Provides land reserved for burials."""
 
     maintenance_cost = 5
