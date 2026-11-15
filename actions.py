@@ -2,7 +2,7 @@ import random
 from typing import Any, Callable, Dict, List
 import Resource_Class as resource_inventory
 from Building_file import (
-    building,
+    all_buildings,
     ResourceBuilding,
     WaterExtractor,
     OxygenGenerator,
@@ -30,8 +30,15 @@ from Building_file import (
     Canteen,
     LogisticsBuilding,
     ResearchBuilding,
+    University,
+    MedicalBay,
+    Hospital,
+    Graveyard,
+    CommunicationsHub,
+    SatelliteDish,
 )
 from hazards import HazardManager
+from time_system import BUILDING_BASE_OUTPUTS, TimeEngine, advance_sol, advance_multiple_sols
 
 
 SPACE_ENVIRONMENTS = {
@@ -70,29 +77,7 @@ SPACE_ENVIRONMENTS = {
 }
 
 
-BUILDING_DAILY_PROFILES = {
-    'PowerPlant': ({}, 95.0),
-    'WaterExtractor': ({'electricity': 15.0}, 24.0),
-    'IceMinor': ({'electricity': 18.0}, 30.0),
-    'OxygenGenerator': ({'electricity': 18.0, 'CO2': 4.0}, 8.0),
-    'CarbonDioxideGenerator': ({'electricity': 10.0}, 10.0),
-    'NitrogenGenerator': ({'electricity': 12.0}, 6.0),
-    'HydrogenGenerator': ({'electricity': 16.0, 'water': 6.0}, 8.0),
-    'FoodFactory': ({'water': 10.0, 'electricity': 18.0}, 15000.0),
-    'FuelRefinery': ({'electricity': 18.0, 'Hydrogen': 6.0, 'CO2': 4.0}, 20.0),
-    'AluminumMine': ({'electricity': 15.0}, 12.0),
-    'SteelMill': ({'electricity': 18.0, 'dirt': 12.0}, 12.0),
-    'SoilProcessor': ({'electricity': 12.0}, 30.0),
-    'PlasticFactory': ({'electricity': 14.0, 'CO2': 4.0, 'Hydrogen': 4.0}, 10.0),
-    'GlassFactory': ({'electricity': 14.0, 'dirt': 12.0}, 10.0),
-    'Farm': ({'water': 8.0, 'electricity': 10.0}, 6.0),
-    'CarFactory': ({'electricity': 25.0, 'aluminum': 20.0, 'steel': 20.0}, 1.0),
-    'TruckFactory': ({'electricity': 30.0, 'aluminum': 25.0, 'steel': 30.0}, 1.0),
-    'RoverFactory': ({'electricity': 30.0, 'aluminum': 25.0, 'steel': 20.0}, 1.0),
-    'SatelliteFactory': ({'electricity': 35.0, 'aluminum': 20.0, 'glass': 15.0}, 1.0),
-    'RocketFactory': ({'electricity': 50.0, 'aluminum': 60.0, 'steel': 60.0}, 1.0),
-    'DroneFactory': ({'electricity': 20.0, 'aluminum': 12.0, 'plastic': 8.0}, 1.0),
-}
+FoodFactory.storage_capacity = 50000
 
 
 class GameState:
@@ -117,6 +102,7 @@ class GameState:
         self.science_points = 0.0
         self.active_satellites = 0
         self.daily_report: Dict[str, Dict[str, float]] = {}
+        self.time_engine = TimeEngine()
         self.hazard_manager = HazardManager()
         self.log: List[str] = []
 
@@ -182,7 +168,11 @@ def _get_available_worker(state: GameState, worker_index: int) -> Any:
     if worker is None:
         return None
     if not worker.isAvailable():
-        state.log.append(f'{worker.Name} is busy right now.')
+        if getattr(worker, 'assigned_building', None) is not None:
+            bld_name = worker.assigned_building.name
+            state.log.append(f'{worker.Name} is staffed at {bld_name}. Unstaff first.')
+        else:
+            state.log.append(f'{worker.Name} is busy right now.')
         return None
     return worker
 
@@ -218,6 +208,14 @@ def assign_worker_job(state: GameState, worker_index: int, profession_code: int)
     worker = _get_worker(state, worker_index)
     if worker is None:
         return False
+    assigned_bld = getattr(worker, 'assigned_building', None)
+    if assigned_bld is not None:
+        worker.assigned_building = None
+        try:
+            assigned_bld.remove_worker(worker)
+        except ValueError:
+            pass
+        state.log.append(f'{worker.Name} removed from {assigned_bld.name} before job change.')
     worker.setType(profession_code)
     state.log.append(f'{worker.Name} assigned to {worker.getType().name}.')
     return True
@@ -240,6 +238,9 @@ def send_worker_to_rest(state: GameState, worker_index: int) -> bool:
     worker = _get_worker(state, worker_index)
     if worker is None:
         return False
+    if getattr(worker, 'assigned_building', None) is not None:
+        state.log.append(f'{worker.Name} is staffed at {worker.assigned_building.name}. Unstaff first to rest.')
+        return False
     worker.SendToRest()
     for i in range(len(worker.getDebuffs())):
         worker.modDebuff(-2.0, i)
@@ -248,7 +249,7 @@ def send_worker_to_rest(state: GameState, worker_index: int) -> bool:
 
 
 def send_worker_to_hospital(state: GameState, worker_index: int) -> bool:
-    worker = _get_worker(state, worker_index)
+    worker = _get_available_worker(state, worker_index)
     if worker is None:
         return False
     if not _spend_bundle(state, {'water': 2.0, 'electricity': 5.0}):
@@ -262,7 +263,7 @@ def send_worker_to_hospital(state: GameState, worker_index: int) -> bool:
 
 
 def send_worker_to_study(state: GameState, worker_index: int) -> bool:
-    worker = _get_worker(state, worker_index)
+    worker = _get_available_worker(state, worker_index)
     if worker is None:
         return False
     if not spend_resource(state, 'electricity', 5.0):
@@ -283,10 +284,41 @@ def send_worker_to_study(state: GameState, worker_index: int) -> bool:
     return True
 
 
+def train_worker_university(state: GameState, building_index: int, worker_index: int, profession_name: str) -> bool:
+    if not (0 <= building_index < len(state.buildings)):
+        state.log.append('Invalid building index.')
+        return False
+    uni = state.buildings[building_index]
+    if not isinstance(uni, University):
+        state.log.append(f'{uni.name} is not a University.')
+        return False
+    worker = _get_available_worker(state, worker_index)
+    if worker is None:
+        return False
+    formatted = profession_name.strip().capitalize()
+    try:
+        ok = uni.train_worker(worker, formatted)
+    except ValueError as err:
+        state.log.append(str(err))
+        return False
+    if not ok:
+        state.log.append(f'{uni.name} could not train {worker.Name} (check staffing, 5 research, 20 electricity, 5 food).')
+        return False
+    state.log.append(f'{uni.name} trained {worker.Name} as {formatted}.')
+    return True
+
+
 def retire_worker(state: GameState, worker_index: int) -> bool:
     worker = _get_worker(state, worker_index)
     if worker is None:
         return False
+    assigned_bld = getattr(worker, 'assigned_building', None)
+    if assigned_bld is not None:
+        worker.assigned_building = None
+        try:
+            assigned_bld.remove_worker(worker)
+        except ValueError:
+            pass
     worker.Retire()
     worker.retired = True
     state.log.append(f'{worker.Name} retired from active duty.')
@@ -505,35 +537,41 @@ def manufacture_item(state: GameState, worker_index: int, item_name: str) -> boo
 def build_from_catalog(building_key: str) -> Any:
     key = building_key.strip().lower()
     catalog = {
-        'power': lambda: PowerPlant('Solar Power Plant', safety_rating=95, number_of_workers=1),
-        'water': lambda: WaterExtractor('Water Extractor', safety_rating=92, number_of_workers=1),
-        'iceminer': lambda: IceMinor('Ice Mining Facility', safety_rating=90, number_of_workers=2),
-        'oxygen': lambda: OxygenGenerator('Oxygen Generator', safety_rating=95, number_of_workers=1),
-        'co2': lambda: CarbonDioxideGenerator('CO2 Scrubber', safety_rating=94, number_of_workers=1),
-        'nitrogen': lambda: NitrogenGenerator('Nitrogen Generator', safety_rating=94, number_of_workers=1),
-        'hydrogen': lambda: HydrogenGenerator('Hydrogen Generator', safety_rating=92, number_of_workers=1),
-        'food': lambda: FoodFactory('Food Factory', safety_rating=96, number_of_workers=2),
-        'fuel': lambda: FuelRefinery('Fuel Refinery', safety_rating=91, number_of_workers=2),
-        'aluminum': lambda: AluminumMine('Aluminum Mine', safety_rating=90, number_of_workers=2),
-        'steel': lambda: SteelMill('Steel Mill', safety_rating=89, number_of_workers=2),
-        'soil': lambda: SoilProcessor('Soil Processor', safety_rating=93, number_of_workers=1),
-        'plastic': lambda: PlasticFactory('Plastic Factory', safety_rating=92, number_of_workers=2),
-        'glass': lambda: GlassFactory('Glass Factory', safety_rating=93, number_of_workers=1),
-        'farm_lettuce': lambda: Farm('Lettuce Farm', crop='lettuce', product_type='crop', safety_rating=96, number_of_workers=1),
-        'farm_wheat': lambda: Farm('Wheat Farm', crop='wheat', product_type='crop', safety_rating=96, number_of_workers=1),
-        'farm_flax': lambda: Farm('Flax Farm', crop='flax', product_type='crop', safety_rating=96, number_of_workers=1),
-        'farm_sunflower': lambda: Farm('Sunflower Farm', crop='sunflower', product_type='crop', safety_rating=96, number_of_workers=1),
-        'car_factory': lambda: CarFactory('Car Factory', safety_rating=90, number_of_workers=3),
-        'truck_factory': lambda: TruckFactory('Truck Factory', safety_rating=90, number_of_workers=3),
-        'rover_factory': lambda: RoverFactory('Rover Factory', safety_rating=92, number_of_workers=3),
-        'satellite_factory': lambda: SatelliteFactory('Satellite Factory', safety_rating=94, number_of_workers=3),
-        'rocket_factory': lambda: RocketFactory('Rocket Factory', safety_rating=90, number_of_workers=4),
-        'drone_factory': lambda: DroneFactory('Drone Factory', safety_rating=93, number_of_workers=2),
-        'habitation': lambda: Habitation('Habitation Dome', safety_rating=98, number_of_workers=1),
-        'recreation': lambda: RecreationCenter('Recreation Center', safety_rating=98, number_of_workers=1),
-        'canteen': lambda: Canteen('Colony Canteen', safety_rating=97, number_of_workers=1),
-        'logistics': lambda: LogisticsBuilding('Logistics Hub', safety_rating=96, number_of_workers=2, transfer_amount=25000),
-        'research': lambda: ResearchBuilding('Research Lab', safety_rating=96, number_of_workers=2),
+        'power': lambda: PowerPlant('Solar Power Plant', safety_rating=95),
+        'water': lambda: WaterExtractor('Water Extractor', safety_rating=92),
+        'iceminer': lambda: IceMinor('Ice Mining Facility', safety_rating=90),
+        'oxygen': lambda: OxygenGenerator('Oxygen Generator', safety_rating=95),
+        'co2': lambda: CarbonDioxideGenerator('CO2 Scrubber', safety_rating=94),
+        'nitrogen': lambda: NitrogenGenerator('Nitrogen Generator', safety_rating=94),
+        'hydrogen': lambda: HydrogenGenerator('Hydrogen Generator', safety_rating=92),
+        'food': lambda: FoodFactory('Food Factory', safety_rating=96),
+        'fuel': lambda: FuelRefinery('Fuel Refinery', safety_rating=91),
+        'aluminum': lambda: AluminumMine('Aluminum Mine', safety_rating=90),
+        'steel': lambda: SteelMill('Steel Mill', safety_rating=89),
+        'soil': lambda: SoilProcessor('Soil Processor', safety_rating=93),
+        'plastic': lambda: PlasticFactory('Plastic Factory', safety_rating=92),
+        'glass': lambda: GlassFactory('Glass Factory', safety_rating=93),
+        'farm_lettuce': lambda: Farm('Lettuce Farm', crop='lettuce', product_type='crop', safety_rating=96),
+        'farm_wheat': lambda: Farm('Wheat Farm', crop='wheat', product_type='crop', safety_rating=96),
+        'farm_flax': lambda: Farm('Flax Farm', crop='flax', product_type='crop', safety_rating=96),
+        'farm_sunflower': lambda: Farm('Sunflower Farm', crop='sunflower', product_type='crop', safety_rating=96),
+        'car_factory': lambda: CarFactory('Car Factory', safety_rating=90),
+        'truck_factory': lambda: TruckFactory('Truck Factory', safety_rating=90),
+        'rover_factory': lambda: RoverFactory('Rover Factory', safety_rating=92),
+        'satellite_factory': lambda: SatelliteFactory('Satellite Factory', safety_rating=94),
+        'rocket_factory': lambda: RocketFactory('Rocket Factory', safety_rating=90),
+        'drone_factory': lambda: DroneFactory('Drone Factory', safety_rating=93),
+        'habitation': lambda: Habitation('Habitation Dome', safety_rating=98),
+        'recreation': lambda: RecreationCenter('Recreation Center', safety_rating=98),
+        'canteen': lambda: Canteen('Colony Canteen', safety_rating=97),
+        'logistics': lambda: LogisticsBuilding('Logistics Hub', safety_rating=96, transfer_amount=25000),
+        'research': lambda: ResearchBuilding('Research Lab', safety_rating=96),
+        'university': lambda: University('Colony University', safety_rating=97),
+        'medical_bay': lambda: MedicalBay('Medical Bay', safety_rating=97),
+        'hospital': lambda: Hospital('Colony Hospital', safety_rating=98),
+        'graveyard': lambda: Graveyard('Memorial Grounds', safety_rating=100),
+        'comms_hub': lambda: CommunicationsHub('Communications Hub', safety_rating=96),
+        'satellite_dish': lambda: SatelliteDish('Satellite Dish', safety_rating=95),
     }
     factory_fn = catalog.get(key)
     if factory_fn is None:
@@ -551,12 +589,14 @@ def construct_building(state: GameState, new_building: Any) -> bool:
     power_cost = round(float(getattr(new_building, 'production_cost', 500)) * 0.05, 1)
     costs = {'electricity': power_cost, 'steel': 20.0, 'aluminum': 20.0}
     if not _spend_bundle(state, costs):
+        if new_building in all_buildings:
+            all_buildings.remove(new_building)
         state.log.append(f'Need {power_cost} electricity, 20 steel, and 20 aluminum to build {new_building.name}.')
         return False
     state.buildings.append(new_building)
     for storage_key in ('water', 'oxigen', 'electricity', 'food'):
         expand_resource_max(state, storage_key, 250.0)
-    state.log.append(f'Constructed {new_building.name} (+250 storage caps).')
+    state.log.append(f'Constructed {new_building.name} (+250 storage caps). Assign required workers with staff_building.')
     return True
 
 
@@ -574,18 +614,40 @@ def toggle_building(state: GameState, building_index: int) -> bool:
     return True
 
 
-def set_building_workers(state: GameState, building_index: int, worker_count: int) -> bool:
+def assign_building_worker(state: GameState, building_index: int, worker_index: int) -> bool:
     if not (0 <= building_index < len(state.buildings)):
         state.log.append('Invalid building index.')
         return False
+    worker = _get_available_worker(state, worker_index)
+    if worker is None:
+        return False
     bld = state.buildings[building_index]
     try:
-        bld.number_of_workers = worker_count
-        state.log.append(f'{bld.name} staffed with {worker_count} workers.')
+        bld.assign_worker(worker)
+        worker.assigned_building = bld
+        state.log.append(f'{worker.Name} ({worker.getType().name}) staffed at {bld.name}.')
         return True
-    except (TypeError, ValueError) as err:
+    except ValueError as err:
         state.log.append(str(err))
         return False
+
+
+def unassign_building_worker(state: GameState, building_index: int, worker_index: int) -> bool:
+    if not (0 <= building_index < len(state.buildings)):
+        state.log.append('Invalid building index.')
+        return False
+    if not (0 <= worker_index < len(state.workers)):
+        state.log.append('Invalid worker index.')
+        return False
+    bld = state.buildings[building_index]
+    worker = state.workers[worker_index]
+    if worker not in bld.workers:
+        state.log.append(f'{worker.Name} is not assigned to {bld.name}.')
+        return False
+    worker.assigned_building = None
+    bld.remove_worker(worker)
+    state.log.append(f'{worker.Name} unassigned from {bld.name} and now Ready.')
+    return True
 
 
 def operate_factory(state: GameState, factory_index: int, worker_indices: List[int]) -> bool:
@@ -596,19 +658,21 @@ def operate_factory(state: GameState, factory_index: int, worker_indices: List[i
     if not isinstance(facility, ResourceBuilding):
         state.log.append(f'{facility.name} is not a production building.')
         return False
-    needed_workers = max(1, int(getattr(facility, 'number_of_workers', 1)))
+    if not facility.is_on:
+        state.log.append(f'{facility.name} is turned Off.')
+        return False
     unique_indices = list(dict.fromkeys(worker_indices))
-    if len(unique_indices) < needed_workers:
-        state.log.append(f'{facility.name} requires {needed_workers} workers.')
+    if not unique_indices:
+        state.log.append(f'Provide at least 1 worker index for {facility.name}.')
         return False
     crew_assigned = []
-    for idx in unique_indices[:needed_workers]:
+    for idx in unique_indices:
         worker = _get_available_worker(state, idx)
         if worker is None:
             return False
         crew_assigned.append(worker)
     if not spend_resource(state, 'electricity', 15.0):
-        state.log.append(f'{facility.name} needs 15 electricity to run shift.')
+        state.log.append(f'{facility.name} needs 15 electricity to run manual shift.')
         return False
     avg_eff = sum(_worker_efficiency(w, 'Engineer') for w in crew_assigned) / len(crew_assigned)
     safety = float(getattr(facility, 'safety_rating', 90))
@@ -618,8 +682,11 @@ def operate_factory(state: GameState, factory_index: int, worker_indices: List[i
         damage = 8.0 if random.random() > safety_ratio else 2.0
         _damage_worker(worker, damage)
     cls_name = type(facility).__name__
-    _, base_out = BUILDING_DAILY_PROFILES.get(cls_name, ({}, 10.0))
-    produced = facility.produce(round(base_out * avg_eff, 1))
+    base_out = BUILDING_BASE_OUTPUTS.get(cls_name, 10.0)
+    storage = facility._get_storage(facility.resource_attribute)
+    prev = storage.getResources()
+    storage.addResources(round(base_out * avg_eff, 1))
+    produced = round(storage.getResources() - prev, 1)
     state.log.append(f'{facility.name} stored +{produced} {facility.resource_attribute} locally.')
     return True
 
@@ -652,12 +719,34 @@ def run_research_lab(state: GameState, building_index: int, points: int = 1) -> 
     if not isinstance(lab, ResearchBuilding):
         state.log.append(f'{lab.name} is not a ResearchBuilding.')
         return False
+    if not lab.is_operational():
+        state.log.append(f'{lab.name} is not operational (requires On + 1 Engineer + 1 Biologist).')
+        return False
     gained = lab.produce_research(max(1, int(points)))
     if gained <= 0:
-        state.log.append(f'{lab.name} lacked inputs or power to produce research.')
+        state.log.append(f'{lab.name} lacked inputs to produce research.')
         return False
     state.science_points += gained * 15.0
     state.log.append(f'{lab.name} generated +{gained} research points (+{gained * 15.0:.1f} science).')
+    return True
+
+
+def transfer_logistics(state: GameState) -> bool:
+    resource_buildings = [b for b in state.buildings if isinstance(b, ResourceBuilding)]
+    hubs = [b for b in state.buildings if isinstance(b, LogisticsBuilding) and b.is_operational()]
+    if not hubs:
+        state.log.append('No operational LogisticsBuilding (requires On + 1 Pilot).')
+        return False
+    total_moved: Dict[str, float] = {}
+    for hub in hubs:
+        moved = hub.process_turn(resource_buildings)
+        for k, v in moved.items():
+            total_moved[k] = total_moved.get(k, 0.0) + v
+    if not total_moved:
+        state.log.append('Logistics hubs found no local stockpiles to transfer.')
+        return False
+    summary = ', '.join(f'+{v:.1f} {k}' for k, v in total_moved.items())
+    state.log.append(f'Logistics transfer complete: {summary}.')
     return True
 
 
@@ -754,190 +843,6 @@ def resolve_crises(state: GameState) -> bool:
     return resolved_any
 
 
-'Turn progression'
-
-def advance_sol(state: GameState) -> None:
-    state.sol += 1
-    env = state.space
-    tracked = ['food', 'water', 'oxigen', 'CO2', 'Nitrogen', 'electricity', 'steel', 'aluminum', 'plastic', 'dirt']
-    gained = {k: 0.0 for k in tracked}
-    spent = {k: 0.0 for k in tracked}
-
-    active = [w for w in state.workers if not getattr(w, 'retired', False) and w.getHealth() > 0]
-    people_count = len(active)
-    total_volume = sum(float(getattr(b, 'volume', 100)) for b in state.buildings if getattr(b, 'is_on', True))
-    space_units = max(1.0, total_volume / 100.0)
-
-    ordered_buildings = sorted(
-        state.buildings,
-        key=lambda b: 0 if isinstance(b, PowerPlant) else 1,
-    )
-
-    resource_buildings: List[ResourceBuilding] = []
-    logistics_buildings: List[LogisticsBuilding] = []
-
-    for bld in ordered_buildings:
-        if not getattr(bld, 'is_on', True):
-            continue
-        if isinstance(bld, LogisticsBuilding):
-            logistics_buildings.append(bld)
-            continue
-        if not isinstance(bld, ResourceBuilding):
-            continue
-
-        resource_buildings.append(bld)
-        cls_name = type(bld).__name__
-        inputs, base_output = BUILDING_DAILY_PROFILES.get(cls_name, ({'electricity': 10.0}, 5.0))
-
-        if inputs and not _spend_bundle(state, inputs):
-            state.log.append(f'{bld.name} offline today (missing inputs).')
-            continue
-
-        for res_name, amt in inputs.items():
-            if res_name in spent:
-                spent[res_name] += amt
-
-        safety = float(getattr(bld, 'safety_rating', 95))
-        safety_factor = (safety / 100.0) if safety > 1.0 else safety
-        max_cap = max(1, int(getattr(type(bld), 'max_worker_capacity', 1)))
-        workers_assigned = int(getattr(bld, 'number_of_workers', 0))
-        staff_factor = 0.5 + 0.5 * (workers_assigned / max_cap)
-        env_factor = env['solar_multiplier'] if isinstance(bld, PowerPlant) else 1.0
-
-        produced_qty = round(base_output * max(0.3, safety_factor) * staff_factor * env_factor, 1)
-        bld.produce(produced_qty)
-
-    if logistics_buildings and resource_buildings:
-        for hub in logistics_buildings:
-            if not getattr(hub, 'is_on', True):
-                continue
-            if not spend_resource(state, 'electricity', 8.0):
-                state.log.append(f'{hub.name} lacked 8 electricity for logistics transfer.')
-                continue
-            spent['electricity'] += 8.0
-            transferred = hub.process_turn(resource_buildings)
-            for res_name, amt in transferred.items():
-                if res_name in gained:
-                    gained[res_name] += amt
-    else:
-        for bld in resource_buildings:
-            for res_name, local_store in list(bld.storage.items()):
-                avail = local_store.getResources()
-                if avail > 0:
-                    prev = get_resource(state, res_name)
-                    add_resource(state, res_name, avail)
-                    accepted = get_resource(state, res_name) - prev
-                    if accepted > 0:
-                        local_store.SubtractResources(accepted)
-                        if res_name in gained:
-                            gained[res_name] += accepted
-
-    if state.active_satellites > 0:
-        sat_power = round(state.active_satellites * 20.0 * env['solar_multiplier'], 1)
-        add_resource(state, 'electricity', sat_power)
-        gained['electricity'] += sat_power
-
-    space_power_cost = round(space_units * env['power_per_100m3'], 1)
-    space_o2_cost = round(space_units * env['o2_leak_per_100m3'], 2)
-    space_n2_cost = round(space_units * env['n2_leak_per_100m3'], 2)
-
-    if spend_resource(state, 'electricity', space_power_cost):
-        spent['electricity'] += space_power_cost
-    else:
-        actual = get_resource(state, 'electricity')
-        spend_resource(state, 'electricity', actual)
-        spent['electricity'] += actual
-        for worker in active:
-            _damage_worker(worker, 6.0)
-        state.log.append(f'Life-support power deficit across {total_volume:.0f} m^3 base volume!')
-
-    o2_used = min(space_o2_cost, get_resource(state, 'oxigen'))
-    spend_resource(state, 'oxigen', o2_used)
-    spent['oxigen'] += o2_used
-
-    n2_used = min(space_n2_cost, get_resource(state, 'Nitrogen'))
-    spend_resource(state, 'Nitrogen', n2_used)
-    spent['Nitrogen'] += n2_used
-
-    has_canteen = any(isinstance(b, Canteen) and getattr(b, 'is_on', True) for b in state.buildings)
-    has_recreation = any(isinstance(b, RecreationCenter) and getattr(b, 'is_on', True) for b in state.buildings)
-    total_bed_cap = sum(
-        int(getattr(b, 'resident_capacity', 0))
-        for b in state.buildings
-        if isinstance(b, Habitation) and getattr(b, 'is_on', True)
-    )
-
-    if total_bed_cap > 0 and people_count > total_bed_cap:
-        for worker in active:
-            _damage_worker(worker, 4.0)
-        state.log.append(f'Overcrowding! {people_count} crew exceed {total_bed_cap} habitation beds (-4 HP).')
-
-    daily_kcal_need = 1800.0 if has_canteen else 2000.0
-
-    for worker in active:
-        worker.age += 1
-
-        if spend_resource(state, 'food', daily_kcal_need):
-            spent['food'] += daily_kcal_need
-        else:
-            _damage_worker(worker, 15.0)
-            state.log.append(f'Food shortage (-{daily_kcal_need:.0f} kcal needed)! {worker.Name} took 15 damage.')
-
-        if spend_resource(state, 'water', 2.5):
-            spent['water'] += 2.5
-        else:
-            _damage_worker(worker, 15.0)
-            state.log.append(f'Water shortage (-2.5 L needed)! {worker.Name} took 15 damage.')
-
-        if spend_resource(state, 'oxigen', 0.84):
-            spent['oxigen'] += 0.84
-        else:
-            _damage_worker(worker, 20.0)
-            state.log.append(f'Oxigen shortage (-0.84 kg needed)! {worker.Name} took 20 damage.')
-
-        if spend_resource(state, 'electricity', 4.0):
-            spent['electricity'] += 4.0
-
-        add_resource(state, 'CO2', 1.0)
-        gained['CO2'] += 1.0
-
-        if has_recreation:
-            for i in range(len(worker.getDebuffs())):
-                worker.modDebuff(-1.5, i)
-
-        if not worker.isAvailable():
-            worker.SendToRest()
-
-    for bld in state.buildings:
-        if hasattr(bld, 'safety_rating') and getattr(bld, 'is_on', True):
-            if bld.safety_rating <= 1.0:
-                bld.safety_rating = max(0.5, round(bld.safety_rating - 0.01, 2))
-            else:
-                bld.safety_rating = max(50, bld.safety_rating - 1)
-
-    state.hazard_manager.process_turn(state)
-
-    state.daily_report = {
-        k: {
-            'added': round(gained[k], 1),
-            'subtracted': round(spent[k], 1),
-            'net': round(gained[k] - spent[k], 1),
-        }
-        for k in tracked
-        if gained[k] > 0 or spent[k] > 0
-    }
-
-    env_label = env['label']
-    net_food = state.daily_report.get('food', {}).get('net', 0)
-    net_o2 = state.daily_report.get('oxigen', {}).get('net', 0)
-    net_water = state.daily_report.get('water', {}).get('net', 0)
-    net_power = state.daily_report.get('electricity', {}).get('net', 0)
-    state.log.append(
-        f'Sol {state.sol} ({env_label} | Crew: {people_count} | Vol: {total_volume:.0f} m^3): '
-        f'Food {net_food:+.0f} kcal, O2 {net_o2:+.1f}, Water {net_water:+.1f}, Power {net_power:+.1f}'
-    )
-
-
 'Action router'
 
 class ActionRouter:
@@ -949,6 +854,7 @@ class ActionRouter:
             'rest': send_worker_to_rest,
             'hospital': send_worker_to_hospital,
             'study': send_worker_to_study,
+            'university_train': train_worker_university,
             'retire': retire_worker,
             'run_moxie': run_moxie,
             'balance_atmosphere': balance_atmosphere,
@@ -961,16 +867,19 @@ class ActionRouter:
             'manufacture': manufacture_item,
             'construct_building': construct_building,
             'toggle_building': toggle_building,
-            'staff_building': set_building_workers,
+            'staff_building': assign_building_worker,
+            'unstaff_building': unassign_building_worker,
             'operate_factory': operate_factory,
             'maintain_buildings': maintain_buildings,
             'run_research': run_research_lab,
+            'transfer_logistics': transfer_logistics,
             'deploy_rover': deploy_rover,
             'fly_drone': fly_drone,
             'launch_satellite': launch_satellite,
             'launch_rocket': launch_rocket,
             'resolve_crises': resolve_crises,
             'advance_sol': advance_sol,
+            'advance_sols': advance_multiple_sols,
         }
 
     def available_actions(self) -> List[str]:
