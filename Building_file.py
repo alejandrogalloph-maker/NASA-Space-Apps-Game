@@ -474,3 +474,74 @@ class LogisticsBuilding(building):
                         transferred.get(resource_name, 0) + accepted
                     )
         return transferred
+
+
+class ResearchBuilding(building):
+    """Consumes colony resources to create globally available research points."""
+
+    maintenance_cost = 25
+    production_cost = 2000
+    worker_cost = 6
+    max_worker_capacity = 10
+    volume = 350
+
+    # Default inputs required for one research point; callers can supply another recipe.
+    DEFAULT_RESOURCE_COSTS = {
+        "electricity": 10,
+        "aluminum": 2,
+        "food": 1,
+    }
+
+    def __init__(
+        self,
+        name: str,
+        safety_rating: int | float = 0,
+        number_of_workers: int = 0,
+        resource_costs: dict[str, int | float] | None = None,
+    ):
+        """Create a lab with a configurable amount of colony resources per point."""
+        super().__init__(name, safety_rating, number_of_workers)
+        self.resource_costs = dict(
+            self.DEFAULT_RESOURCE_COSTS if resource_costs is None else resource_costs
+        )
+
+        # Validate the recipe up front so processing cannot fail halfway through.
+        for resource_name, cost in self.resource_costs.items():
+            inventory = getattr(resource_inventory, resource_name, None)
+            if not isinstance(inventory, resource_inventory.resources):
+                raise ValueError(f"Unknown colony resource: {resource_name}")
+            if resource_name == "research":
+                raise ValueError("Research points cannot be used as research inputs")
+            if cost < 0:
+                raise ValueError("Resource costs must be non-negative")
+
+    def get_info(self) -> str:
+        """Include the research recipe in the building summary."""
+        return super().get_info() + f", Resource Cost per Point: {self.resource_costs}"
+
+    def produce_research(self, amount: int | float = 1) -> int | float:
+        """Spend the full recipe and add research points, or leave stocks unchanged."""
+        if amount < 0:
+            raise ValueError("Research amount must be non-negative")
+        if not self.is_on or amount == 0:
+            return 0
+
+        research_inventory = resource_inventory.research
+        if research_inventory.getMaxResources() - research_inventory.getResources() < amount:
+            return 0
+
+        # Check every input before subtracting any, so an incomplete recipe costs nothing.
+        required_resources = {
+            resource_name: cost * amount
+            for resource_name, cost in self.resource_costs.items()
+        }
+        for resource_name, required in required_resources.items():
+            inventory = getattr(resource_inventory, resource_name)
+            if inventory.getResources() < required:
+                return 0
+
+        for resource_name, required in required_resources.items():
+            getattr(resource_inventory, resource_name).SubtractResources(required)
+
+        research_inventory.addResources(amount)
+        return amount
