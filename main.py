@@ -27,7 +27,10 @@ from actions import (
 )
 
 
-def choose_mission_setup() -> tuple[str, int]:
+def choose_mission_setup() -> tuple[str, int, int, float]:
+    print('======================================================')
+    print('            NASA SPACE APPS: COLONY COMMAND           ')
+    print('======================================================')
     print('Select Mission Space Environment:')
     options = list(SPACE_ENVIRONMENTS.items())
     for idx, (key, info) in enumerate(options, start=1):
@@ -51,7 +54,23 @@ def choose_mission_setup() -> tuple[str, int]:
     except ValueError:
         crew_count = 6
 
-    return selected_space, crew_count
+    sol_raw = input('Enter target mission duration in Sols [10-365] (default 30): ').strip()
+    try:
+        target_sols = max(10, min(365, int(sol_raw)))
+    except ValueError:
+        target_sols = 30
+
+    sci_raw = input('Enter target Science Points to win [100-5000] (default 500): ').strip()
+    try:
+        target_sci = float(max(100, min(5000, int(sci_raw))))
+    except ValueError:
+        target_sci = 500.0
+
+    print('\\n======================================================')
+    print('                 MISSION AUTHORIZED                   ')
+    print(f' Target: Survive {target_sols} Sols and reach {target_sci} Science.')
+    print('======================================================\\n')
+    return selected_space, crew_count, target_sols, target_sci
 
 
 def setup_game(space_key: str = 'mars', crew_count: int = 6) -> ActionRouter:
@@ -118,7 +137,33 @@ def setup_game(space_key: str = 'mars', crew_count: int = 6) -> ActionRouter:
     return router
 
 
-def show_status(state: GameState) -> None:
+def print_mission_report(state: GameState, target_sols: int, target_sci: float) -> None:
+    active_crew = [w for w in state.workers if not getattr(w, 'retired', False) and w.getHealth() > 0]
+    total_crew = len(state.workers)
+    survival_rate = (len(active_crew) / total_crew) * 100 if total_crew else 0
+    sci = state.science_points
+
+    print('\\n======================================================')
+    print('                 POST-MISSION ANALYSIS                ')
+    print('======================================================')
+    if not active_crew:
+        print('STATUS: [FAILED] - Total Loss of Crew.')
+        print('Reason: Life support reserves depleted or hazards overwhelmed the colony.')
+    elif state.sol < target_sols:
+        print('STATUS: [ABORTED] - Mission terminated early.')
+    elif sci >= target_sci:
+        print('STATUS: [SUCCESS] - Mission duration and Science goals achieved.')
+    else:
+        print(f'STATUS: [FAILED] - Survived, but failed to reach {target_sci} Science.')
+
+    print(f'Duration: {state.sol} Sols / {target_sols} Sols')
+    print(f'Science: {sci:.1f} / {target_sci:.1f}')
+    print(f'Crew Survival: {len(active_crew)}/{total_crew} ({survival_rate:.0f}%)')
+    print(f'Final Colony Safety Rating: {sum(b.safety_rating for b in state.buildings)/max(1, len(state.buildings)):.1f}%')
+    print('======================================================\\n')
+
+
+def show_status(state: GameState, target_sols: int, target_sci: float) -> None:
     active_crew = [w for w in state.workers if not getattr(w, 'retired', False) and w.getHealth() > 0]
     total_volume = sum(float(getattr(b, 'volume', 100)) for b in state.buildings if getattr(b, 'is_on', True))
     space_label = state.space['label']
@@ -128,9 +173,9 @@ def show_status(state: GameState) -> None:
 
     print()
     print(
-        f'Sol {state.sol} ({elapsed_hrs}h) | {space_label} | '
+        f'Sol {state.sol}/{target_sols} ({elapsed_hrs}h) | {space_label} | '
         f'Crew: {len(active_crew)}/{len(state.workers)} | Active Volume: {total_volume:.0f} m^3 | '
-        f'Science: {state.science_points:.1f} | Research Pts: {res_pts} | '
+        f'Science: {state.science_points:.1f}/{target_sci:.0f} | Research Pts: {res_pts} | '
         f'Satellites: {state.active_satellites} | Crisis Risk: {risk_pct}%'
     )
     print(
@@ -207,29 +252,29 @@ def show_status(state: GameState) -> None:
 
 
 def main() -> None:
-    space_key, crew_count = choose_mission_setup()
+    space_key, crew_count, target_sols, target_sci = choose_mission_setup()
     router = setup_game(space_key=space_key, crew_count=crew_count)
     state = router.state
 
     while True:
-        show_status(state)
+        show_status(state, target_sols, target_sci)
         active_crew = [w for w in state.workers if not getattr(w, 'retired', False) and w.getHealth() > 0]
-        if not active_crew:
-            print()
-            print(f'MISSION FAILED on Sol {state.sol}: All crew members lost. Final Science: {state.science_points:.1f}')
+        if not active_crew or state.sol >= target_sols:
+            print_mission_report(state, target_sols, target_sci)
             break
 
         print()
         print('Routes:', ', '.join(router.available_actions()))
         print('Build types: power, water, iceminer, oxygen, co2, nitrogen, hydrogen, food, fuel, aluminum, steel, soil, plastic, glass, farm_lettuce, farm_wheat, habitation, recreation, canteen, logistics, research, university, medical_bay, hospital, graveyard, comms_hub, satellite_dish')
         print()
-        raw = input('Enter command (e.g. unstaff_building 2 5 | mine 5 | advance_sol | advance_sols 3 | quit): ').strip()
+        raw = input('Enter command (e.g. advance_sol | staff_building 2 5 | mine 5 | quit): ').strip()
         if not raw:
             continue
         parts = raw.split()
         cmd = parts[0]
 
         if cmd == 'quit':
+            print_mission_report(state, target_sols, target_sci)
             break
 
         try:
