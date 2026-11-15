@@ -4,7 +4,10 @@ from typing import Any, List
 
 
 class Incident:
+    """Base state and hooks shared by all colony incidents."""
+
     def __init__(self, name: str, description: str, severity: int):
+        """Store incident details and initialize its unresolved state."""
         self.name = name
         self.description = description
         self.severity = severity
@@ -12,20 +15,26 @@ class Incident:
         self.resolved = False
 
     def trigger(self, state: Any) -> None:
+        """Report the incident and apply its immediate effect to the colony."""
         state.log.append(f'CRITICAL INCIDENT [Severity {self.severity}]: {self.name} - {self.description}')
         self.apply_initial_effect(state)
 
     def apply_initial_effect(self, state: Any) -> None:
+        """Hook for incident-specific effects applied once when it begins."""
         pass
 
     def apply_ongoing_penalty(self, state: Any) -> None:
+        """Advance the incident duration; subclasses may also apply ongoing damage."""
         self.turns_active += 1
 
     def check_resolution(self, state: Any) -> bool:
+        """Hook for incident-specific resolution requirements."""
         return True
 
 
 class PowerGridFailure(Incident):
+    """Disrupts power and requires materials and engineers to repair the grid."""
+
     def __init__(self):
         super().__init__(
             'Grid Overload',
@@ -34,6 +43,7 @@ class PowerGridFailure(Incident):
         )
 
     def apply_initial_effect(self, state: Any) -> None:
+        """Drain part of stored electricity and switch off power plants."""
         elec = state.resources.get('electricity')
         if elec is not None:
             loss = round(min(150.0, elec.getResources() * 0.35), 1)
@@ -44,6 +54,7 @@ class PowerGridFailure(Incident):
                 bld.turn_off()
 
     def apply_ongoing_penalty(self, state: Any) -> None:
+        """Increase the power drain each turn the failure remains unresolved."""
         self.turns_active += 1
         elec = state.resources.get('electricity')
         if elec is not None:
@@ -53,6 +64,7 @@ class PowerGridFailure(Incident):
                 state.log.append(f'Ongoing Grid Instability: Drained {drain} kWh.')
 
     def check_resolution(self, state: Any) -> bool:
+        """Repair the grid if aluminum and two available engineers are present."""
         alum = state.resources.get('aluminum')
         if alum is None or alum.getResources() < 50.0:
             return False
@@ -77,6 +89,8 @@ class PowerGridFailure(Incident):
 
 
 class AmmoniaLeak(Incident):
+    """Damages living crew until a doctor seals the coolant leak."""
+
     def __init__(self):
         super().__init__(
             'Ammonia Coolant Leak',
@@ -85,6 +99,7 @@ class AmmoniaLeak(Incident):
         )
 
     def apply_initial_effect(self, state: Any) -> None:
+        """Apply the initial toxic exposure to every active worker."""
         active = [w for w in state.workers if not getattr(w, 'retired', False) and w.getHealth() > 0]
         for w in active:
             if not w.takeDamage(10.0):
@@ -93,6 +108,7 @@ class AmmoniaLeak(Incident):
         state.log.append('Ammonia Leak: Active crew suffered 10 toxic exposure damage.')
 
     def apply_ongoing_penalty(self, state: Any) -> None:
+        """Increase crew exposure damage with each unresolved turn."""
         self.turns_active += 1
         active = [w for w in state.workers if not getattr(w, 'retired', False) and w.getHealth() > 0]
         dmg = round(4.0 * self.turns_active, 1)
@@ -104,6 +120,7 @@ class AmmoniaLeak(Incident):
             state.log.append(f'Ongoing Ammonia Toxicity: Active crew took {dmg} damage.')
 
     def check_resolution(self, state: Any) -> bool:
+        """Seal the leak using plastic, water, and one available doctor."""
         plastic = state.resources.get('plastic')
         water = state.resources.get('water')
         if plastic is None or water is None:
@@ -132,6 +149,8 @@ class AmmoniaLeak(Incident):
 
 
 class MeteorStrike(Incident):
+    """Damages a random building and causes an oxygen leak."""
+
     def __init__(self):
         super().__init__(
             'Micrometeorite Hull Breach',
@@ -140,6 +159,7 @@ class MeteorStrike(Incident):
         )
 
     def apply_initial_effect(self, state: Any) -> None:
+        """Reduce one building's safety and vent some of the stored oxygen."""
         if state.buildings:
             target = random.choice(state.buildings)
             if target.safety_rating > 1.0:
@@ -154,6 +174,7 @@ class MeteorStrike(Incident):
             state.log.append(f'Hull Breach Decompression: Lost {loss} kg oxigen.')
 
     def apply_ongoing_penalty(self, state: Any) -> None:
+        """Increase the oxygen leak each turn until the hull is repaired."""
         self.turns_active += 1
         o2 = state.resources.get('oxigen')
         if o2 is not None:
@@ -163,6 +184,7 @@ class MeteorStrike(Incident):
                 state.log.append(f'Ongoing Hull Leak: Venting {leak} kg oxigen.')
 
     def check_resolution(self, state: Any) -> bool:
+        """Patch the breach using steel, dirt, a geologist, and an engineer."""
         steel = state.resources.get('steel')
         dirt = state.resources.get('dirt')
         if steel is None or dirt is None:
@@ -203,12 +225,16 @@ class MeteorStrike(Incident):
 
 
 class HazardManager:
+    """Calculate colony hazard risk and manage active incident lifecycles."""
+
     def __init__(self):
+        """Set up the incident list, available incident types, and risk score."""
         self.active_incidents: List[Incident] = []
         self.incident_pool = [PowerGridFailure, AmmoniaLeak, MeteorStrike]
         self.last_risk_score: float = 0.0
 
     def compute_risk_probability(self, state: Any) -> float:
+        """Combine environment, building safety/volume, and crew health into risk."""
         base_risk = float(state.space.get('hazard_chance', 0.25)) * 0.45
 
         if state.buildings:
@@ -219,6 +245,7 @@ class HazardManager:
             avg_safety = sum(safety_values) / len(safety_values)
         else:
             avg_safety = 1.0
+        # Low average safety and larger active volume each increase exposure risk.
         degradation_risk = max(0.0, (1.0 - avg_safety) * 0.50)
 
         active_volume = sum(
@@ -235,11 +262,13 @@ class HazardManager:
         else:
             fatigue_risk = 0.0
 
+        # Clamp the combined probability so every turn has a bounded risk.
         total_prob = min(0.65, max(0.05, base_risk + degradation_risk + exposure_risk + fatigue_risk))
         self.last_risk_score = round(total_prob, 3)
         return total_prob
 
     def process_turn(self, state: Any) -> None:
+        """Resolve or penalize existing incidents, then possibly trigger another."""
         for inc in list(self.active_incidents):
             if inc.check_resolution(state):
                 self.active_incidents.remove(inc)
@@ -248,6 +277,7 @@ class HazardManager:
                 state.log.append(f'ONGOING CRISIS: {inc.name} - {inc.description}')
 
         risk_prob = self.compute_risk_probability(state)
+        # Avoid duplicate active incident types and cap simultaneous crises at two.
         if len(self.active_incidents) < 2 and random.random() < risk_prob:
             active_types = {type(i) for i in self.active_incidents}
             candidates = [cls for cls in self.incident_pool if cls not in active_types]
