@@ -55,4 +55,92 @@ class resources
     }
 };
 
-resources 
+class resources
+{
+    int max;
+    int current;
+
+    int getResources()
+    {
+        return current;
+    }
+
+    int getMaxResources()
+    {
+        return max;
+    }
+    void addResources(unsigned int N)
+    {
+        current += N;
+        if (current > max)
+        {
+            current = max;
+        }
+    }
+
+    bool SubtractResources(unsigned int N)
+    {
+        if (current - N < 0)
+        {
+            return false;
+        }
+        else
+        {
+            current -= N;
+            return true;
+        }
+    }
+
+    void AddMax(unsigned int N)
+    {
+        max += N;
+    }
+
+    bool subtractMax(unsigned int N)
+    {
+        max -= N;
+        if (max < 0)
+        {
+            max += N;
+            return false;
+        }
+        if (current > max)
+        {
+            current = max;
+            return true;
+        }
+    }
+};
+
+resources water;            
+resources oxigen;           
+resources CO2;              
+resources Nitrogen;         
+resources Hydrogen;         
+resources food; //Kcals     
+resources electricity; //kWh
+resources fuel; //L  
+
+resources aluminum; //kg    
+resources steel; //kg       
+resources dirt; //kg        
+resources plastic; //kg     
+resources glass; //kg     
+
+resources cars;             
+resources trucks;           
+resources rovers;           
+resources satellites;       
+resources rockets;          
+resources drones; 
+
+resources seed_Lettuce;
+resources seed_Wheat;
+resources seed_Flax;
+resources seed_sunflower;
+resources lettuce;
+resources wheat;
+resources flax;
+resources sunflower;
+
+
