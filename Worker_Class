@@ -1,0 +1,224 @@
+#include <array>
+#include <vector>
+#include <cmath>
+#include <ctime>
+#include <string>
+#include <cstdlib>
+
+enum class Profession
+{
+    Unassigned,
+    Biologist,
+    Doctor,
+    Engineer,
+    Pilot,
+    Geologist
+};
+
+class Worker
+{
+    inline static int TotalCount = 0;
+    inline static int AvailableCount = 0;
+
+    bool Available;
+    int age;       // in days
+    double health; // in percentage
+    std::vector<double> skills;
+    std::vector<double> debuffs;
+    Profession job;
+    std::string Name;
+
+public:
+    Worker(int age)
+    {
+        this->age = age;
+        this->health = 100;
+        Available = true;
+        job = Profession::Unassigned;
+        TotalCount++;
+        AvailableCount++;
+        Name = GiveName();
+
+        int N = 6;
+
+        skills.resize(N);
+        debuffs.resize(N);
+        srand(time(NULL));
+        for (int i = 0; i < N; i++)
+        {
+            skills[i] = (double(rand()) / RAND_MAX) * 100;
+            debuffs[i] = (double(rand()) / RAND_MAX) * 100;
+        }
+    }
+    int getAge()
+    {
+        return age;
+    }
+
+    double getHealth()
+    {
+        return health;
+    }
+
+    bool isAvailable()
+    {
+        return Available;
+    }
+
+    std::vector<double> getSkills()
+    {
+        return skills;
+    }
+
+    std::vector<double> getDebuffs()
+    {
+        return debuffs;
+    }
+
+    Profession getType()
+    {
+        return job;
+    }
+
+    ~Worker()
+    {
+        TotalCount--;
+        if (isAvailable)
+            AvailableCount--;
+    }
+
+    bool SendToWork()
+    {
+        if (isAvailable)
+        {
+            Available = false;
+            AvailableCount--;
+            return true;
+        }
+        return false;
+    }
+
+    bool SendToRest()
+    {
+        if (!isAvailable)
+        {
+            Available = true;
+            AvailableCount++;
+            return true;
+        }
+        double H = double(rand()) / RAND_MAX;
+        if (health + H < 120)
+        {
+            health += H;
+        }
+        return false;
+    }
+
+    void SendToHospital()
+    {
+        if (isAvailable)
+        {
+            Available = false;
+            AvailableCount--;
+        }
+        health += double(rand()) / RAND_MAX * 10;
+        if (health > 250)
+        {
+            health = 250;
+        }
+    }
+
+    void SendToStudy()
+    {
+        if (isAvailable)
+        {
+            Available = false;
+            AvailableCount--;
+        }
+        modSkill(double(rand()) / RAND_MAX * 15, int(double(rand()) / RAND_MAX * skills.size()));
+        modDebuff(double(rand()) / RAND_MAX * -5, int(double(rand()) / RAND_MAX * debuffs.size()));
+    }
+
+    void modSkill(double n, int i)
+    {
+        if (skills[i] + n > 300)
+        {
+            skills[i] = 300;
+        }
+        else
+        {
+            skills[i] += n;
+        }
+    }
+    void modDebuff(double n, int i)
+    {
+        if (debuffs[i] + n < 0)
+        {
+            debuffs[i] = 0;
+        }
+        else
+        {
+            debuffs[i] += n;
+        }
+    }
+
+    std::string GiveName()
+    {
+        static const std::vector<std::string> names = {
+            "Samuel", "Bruce", "Hunter", "Tonya", "Darrick", "Kathrine",
+            "Howard", "Hong", "Robinson", "Cathryn", "Daniela", "Alex",
+            "Sue", "Stephonie", "Rob", "Clair", "Carroll", "Jesse", "Sophia",
+            "Riley"};
+        return names[std::rand() % names.size()];
+    }
+    void Retire()
+    {
+        if (isAvailable)
+            AvailableCount--;
+        Available = false;
+    }
+
+    void setType(int N)
+    {
+        switch (N)
+        {
+        case 1:
+            job = Profession::Doctor;
+            break;
+        case 2:
+            job = Profession::Engineer;
+            break;
+        case 3:
+            job = Profession::Biologist;
+            break;
+        case 4:
+            job = Profession::Geologist;
+            break;
+        case 5:
+            job = Profession::Pilot;
+            break;
+        default:
+            job = Profession::Unassigned;
+            break;
+        }
+    }
+
+    void resetRandomSeed()
+    {
+        srand(time(NULL));
+    }
+
+    bool takeDamage(double i)
+    {
+        double H = getHealth() - i;
+        if (H <= 0)
+        {
+            return false;
+        }
+        else
+        {
+            health = H;
+            return true;
+        }
+    }
+};
