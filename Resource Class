@@ -1,146 +1,76 @@
-class resources
-{
-    int max;
-    int current;
+class resources:
+    def __init__(self, current: int | float = 0, max_val: int | float = 0):
+        self.max = max(0, max_val)
+        self.current = max(0, min(current, self.max))
 
-    int getResources()
-    {
-        return current;
-    }
+    def getResources(self):
+        return self.current
 
-    int getMaxResources()
-    {
-        return max;
-    }
-    void addResources(unsigned int N)
-    {
-        current += N;
-        if (current > max)
-        {
-            current = max;
-        }
-    }
+    def getMaxResources(self):
+        return self.max
 
-    bool SubtractResources(unsigned int N)
-    {
-        if (current - N < 0)
-        {
-            return false;
-        }
-        else
-        {
-            current -= N;
-            return true;
-        }
-    }
+    def addResources(self, N: int | float):
+        if N < 0:
+            raise ValueError("N must be non-negative (unsigned)")
+        self.current += N
+        if self.current > self.max:
+            self.current = self.max
 
-    void AddMax(unsigned int N)
-    {
-        max += N;
-    }
+    def SubtractResources(self, N: int | float) -> bool:
+        if N < 0:
+            raise ValueError("N must be non-negative (unsigned)")
+        if self.current - N < 0:
+            return False
+        else:
+            self.current -= N
+            return True
 
-    bool subtractMax(unsigned int N)
-    {
-        max -= N;
-        if (max < 0)
-        {
-            max += N;
-            return false;
-        }
-        if (current > max)
-        {
-            current = max;
-            return true;
-        }
-    }
-};
+    def AddMax(self, N: int | float):
+        if N < 0:
+            raise ValueError("N must be non-negative (unsigned)")
+        self.max += N
 
-class resources
-{
-    int max;
-    int current;
+    def subtractMax(self, N: int | float) -> bool:
+        if N < 0:
+            raise ValueError("N must be non-negative (unsigned)")
+        self.max -= N
+        if self.max < 0:
+            self.max += N
+            return False
+        if self.current > self.max:
+            self.current = self.max
+        return True
 
-    int getResources()
-    {
-        return current;
-    }
 
-    int getMaxResources()
-    {
-        return max;
-    }
-    void addResources(unsigned int N)
-    {
-        current += N;
-        if (current > max)
-        {
-            current = max;
-        }
-    }
+# Resource instances (matching your C++ declarations)
+water = resources()
+oxigen = resources()
+CO2 = resources()
+Nitrogen = resources()
+Hydrogen = resources()
+food = resources()         # Kcals
+electricity = resources()  # kWh
+fuel = resources()         # L
 
-    bool SubtractResources(unsigned int N)
-    {
-        if (current - N < 0)
-        {
-            return false;
-        }
-        else
-        {
-            current -= N;
-            return true;
-        }
-    }
+aluminum = resources()     # kg
+steel = resources()        # kg
+dirt = resources()         # kg
+plastic = resources()      # kg
+glass = resources()        # kg
 
-    void AddMax(unsigned int N)
-    {
-        max += N;
-    }
+cars = resources()
+trucks = resources()
+rovers = resources()
+satellites = resources()
+rockets = resources()
+drones = resources()
 
-    bool subtractMax(unsigned int N)
-    {
-        max -= N;
-        if (max < 0)
-        {
-            max += N;
-            return false;
-        }
-        if (current > max)
-        {
-            current = max;
-            return true;
-        }
-    }
-};
-
-resources water;            
-resources oxigen;           
-resources CO2;              
-resources Nitrogen;         
-resources Hydrogen;         
-resources food; //Kcals     
-resources electricity; //kWh
-resources fuel; //L  
-
-resources aluminum; //kg    
-resources steel; //kg       
-resources dirt; //kg        
-resources plastic; //kg     
-resources glass; //kg     
-
-resources cars;             
-resources trucks;           
-resources rovers;           
-resources satellites;       
-resources rockets;          
-resources drones; 
-
-resources seed_Lettuce;
-resources seed_Wheat;
-resources seed_Flax;
-resources seed_sunflower;
-resources lettuce;
-resources wheat;
-resources flax;
-resources sunflower;
-
+seed_Lettuce = resources()
+seed_Wheat = resources()
+seed_Flax = resources()
+seed_sunflower = resources()
+lettuce = resources()
+wheat = resources()
+flax = resources()
+sunflower = resources()
 
