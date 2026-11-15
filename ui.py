@@ -8,11 +8,12 @@ Run:
 
 import argparse
 import json
+import random
 import threading
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 import main as game
@@ -39,6 +40,10 @@ except ImportError:
         "habitation", "recreation", "canteen", "logistics", "research", "university",
         "medical_bay", "hospital", "graveyard", "comms_hub", "satellite_dish",
     ]
+
+
+NUM_SET_ACTIONS = 5
+NUM_RANDOM_ACTIONS = 5
 
 
 PHASE_CATALOG: Dict[str, int] = {
@@ -95,6 +100,207 @@ ROLE_PROFILES: Dict[str, Dict[str, str]] = {
 }
 
 
+SET_ACTION_TEMPLATES: List[Dict[str, Any]] = [
+    {
+        "id": "set_atmosphere",
+        "title": "Balance Habitat Atmosphere",
+        "action": "balance_atmosphere",
+        "arg_mode": "none",
+        "param": None,
+        "preferred_role": "",
+        "cost": "10 Water, 20 Electricity",
+        "effect": "+8 Oxygen, +2 H2, +2 N2, -5 CO2",
+    },
+    {
+        "id": "set_maintain",
+        "title": "Preventive Structural Maintenance",
+        "action": "maintain_buildings",
+        "arg_mode": "none",
+        "param": None,
+        "preferred_role": "",
+        "cost": "Upkeep Power + 1 Al / Building",
+        "effect": "+4% Safety Rating on all buildings",
+    },
+    {
+        "id": "set_logistics",
+        "title": "Run Colony Logistics Transfer",
+        "action": "transfer_logistics",
+        "arg_mode": "none",
+        "param": None,
+        "preferred_role": "Pilot",
+        "cost": "Requires Operational Logistics Hub",
+        "effect": "Moves local building buffers to global stock",
+    },
+    {
+        "id": "set_rations",
+        "title": "Distribute Supplemental Crew Rations",
+        "action": "feed_crew",
+        "arg_mode": "none",
+        "param": None,
+        "preferred_role": "",
+        "cost": "2,000 kcal Food & 2.5 Water / Crew",
+        "effect": "Restores +3 HP to injured active crew",
+    },
+    {
+        "id": "set_crises",
+        "title": "Emergency Crisis Containment",
+        "action": "resolve_crises",
+        "arg_mode": "none",
+        "param": None,
+        "preferred_role": "",
+        "cost": "Incident Materials + Ready Specialists",
+        "effect": "Resolves active colony hazards",
+    },
+]
+
+
+RANDOM_ACTION_POOL: List[Dict[str, Any]] = [
+    {
+        "key": "rnd_moxie",
+        "min_phase": 1,
+        "title": "MOXIE High-Output O2 Cycle",
+        "action": "run_moxie",
+        "arg_mode": "worker",
+        "param": None,
+        "preferred_role": "Engineer",
+        "cost": "25 Electricity, 4 CO2 + 1 Ready Worker",
+        "effect": "+6.0x Oxygen (1.5x with Engineer)",
+    },
+    {
+        "key": "rnd_hydro_lettuce",
+        "min_phase": 1,
+        "title": "Hydroponic Flush: Lettuce",
+        "action": "hydroponics",
+        "arg_mode": "worker_param",
+        "param": "lettuce",
+        "preferred_role": "Biologist",
+        "cost": "2 Lettuce Seeds, 12 Water, 15 Power",
+        "effect": "+4.0x Lettuce, +1.5x O2, +1 Seed",
+    },
+    {
+        "key": "rnd_hydro_wheat",
+        "min_phase": 1,
+        "title": "Hydroponic Flush: Wheat",
+        "action": "hydroponics",
+        "arg_mode": "worker_param",
+        "param": "wheat",
+        "preferred_role": "Biologist",
+        "cost": "2 Wheat Seeds, 12 Water, 15 Power",
+        "effect": "+4.0x Wheat, +1.5x O2, +1 Seed",
+    },
+    {
+        "key": "rnd_refine_wheat",
+        "min_phase": 1,
+        "title": "Caloric Ration Processing (Wheat)",
+        "action": "food_refinery",
+        "arg_mode": "worker_param",
+        "param": "wheat",
+        "preferred_role": "Biologist",
+        "cost": "5 Wheat, 10 Electricity + 1 Ready Worker",
+        "effect": "+16,000x Food kcal (1.5x with Biologist)",
+    },
+    {
+        "key": "rnd_refine_lettuce",
+        "min_phase": 1,
+        "title": "Fresh Greens Processing (Lettuce)",
+        "action": "food_refinery",
+        "arg_mode": "worker_param",
+        "param": "lettuce",
+        "preferred_role": "Biologist",
+        "cost": "5 Lettuce, 10 Electricity + 1 Ready Worker",
+        "effect": "+9,000x Food kcal (1.5x with Biologist)",
+    },
+    {
+        "key": "rnd_power_shift",
+        "min_phase": 1,
+        "title": "Manual Auxiliary Generator Shift",
+        "action": "work",
+        "arg_mode": "worker",
+        "param": None,
+        "preferred_role": "Engineer",
+        "cost": "1 Ready Worker (-2 HP fatigue)",
+        "effect": "+6.0x Emergency Electricity",
+    },
+    {
+        "key": "rnd_study_drill",
+        "min_phase": 1,
+        "title": "Telemetry Simulation Training",
+        "action": "study",
+        "arg_mode": "worker",
+        "param": None,
+        "preferred_role": "",
+        "cost": "5 Electricity + 1 Ready Worker",
+        "effect": "+8 Role Skill & lowers debuffs",
+    },
+    {
+        "key": "rnd_med_check",
+        "min_phase": 1,
+        "title": "Preventive Med-Bay Recovery",
+        "action": "hospital",
+        "arg_mode": "worker",
+        "param": None,
+        "preferred_role": "Doctor",
+        "cost": "2 Water, 5 Electricity + 1 Ready Worker",
+        "effect": "Restores HP & clears -5 debuffs",
+    },
+    {
+        "key": "rnd_mine",
+        "min_phase": 2,
+        "title": "Core Drill Regolith & Ice Run",
+        "action": "mine",
+        "arg_mode": "worker",
+        "param": None,
+        "preferred_role": "Geologist",
+        "cost": "15 Electricity, 10 Fuel + 1 Ready Worker",
+        "effect": "+Dirt, Water, Aluminum, Steel & Science",
+    },
+    {
+        "key": "rnd_fuel",
+        "min_phase": 2,
+        "title": "Sabatier Propellant Synthesis",
+        "action": "produce_fuel",
+        "arg_mode": "worker",
+        "param": None,
+        "preferred_role": "Engineer",
+        "cost": "6 CO2, 8 H2, 20 Electricity + 1 Ready Worker",
+        "effect": "+18.0x Fuel & +4.0x Water",
+    },
+    {
+        "key": "rnd_refine_steel",
+        "min_phase": 2,
+        "title": "Smelt Structural Steel Batch",
+        "action": "refine_materials",
+        "arg_mode": "worker_param",
+        "param": "steel",
+        "preferred_role": "Engineer",
+        "cost": "20 Dirt, 20 Electricity + 1 Ready Worker",
+        "effect": "+10.0x Steel Alloy",
+    },
+    {
+        "key": "rnd_rover_survey",
+        "min_phase": 2,
+        "title": "Jezero Rim Rover Traverse",
+        "action": "deploy_rover",
+        "arg_mode": "worker",
+        "param": None,
+        "preferred_role": "Geologist",
+        "cost": "1 Rover, 12 Fuel, 10 Power + 1 Worker",
+        "effect": "+25.0x Science Points & +12.0x Dirt",
+    },
+    {
+        "key": "rnd_drone_recon",
+        "min_phase": 2,
+        "title": "Autonomous Aerial Drone Recon",
+        "action": "fly_drone",
+        "arg_mode": "worker",
+        "param": None,
+        "preferred_role": "Pilot",
+        "cost": "1 Drone, 8 Fuel, 8 Power + 1 Worker",
+        "effect": "+20.0x Science Points & +2 Crop Seeds",
+    },
+]
+
+
 class MissionSession:
     """Thread-safe controller bridging the simulation engine and web console."""
 
@@ -106,6 +312,10 @@ class MissionSession:
         self.aborted: bool = False
         self.unlock_all_override: bool = False
         self.announced_phases: set[int] = {1}
+        self.num_set_actions: int = NUM_SET_ACTIONS
+        self.num_random_actions: int = NUM_RANDOM_ACTIONS
+        self.daily_set_actions: List[Dict[str, Any]] = []
+        self.daily_random_actions: List[Dict[str, Any]] = []
         self.new_mission("mars", 6, 30, 500.0, unlock_all=False)
 
     def new_mission(
@@ -136,14 +346,56 @@ class MissionSession:
             self.router = game.setup_game(space_key=space, crew_count=crew)
             state = self.router.state
 
-            # Ensure every crew member has a stable, non-Unassigned specialist role
+            # Ensure every crew member has a permanent, non-Unassigned specialist role
             role_cycle = [1, 2, 3, 4, 5, 2, 3, 4, 5, 1]
             for idx, w in enumerate(state.workers):
                 if w.getType() == Profession.Unassigned:
                     w.setType(role_cycle[idx % len(role_cycle)])
 
             self._evaluate_unlocks_locked(announce=False)
+            self._roll_daily_actions_locked()
             return self._serialize_locked()
+
+    def _roll_daily_actions_locked(self) -> None:
+        unlocks = self._compute_unlocks_locked()
+        max_phase = unlocks["max_phase"]
+
+        self.daily_set_actions = [
+            {**tpl, "category": "set", "used_today": False}
+            for tpl in SET_ACTION_TEMPLATES[: self.num_set_actions]
+        ]
+
+        eligible = [item for item in RANDOM_ACTION_POOL if item["min_phase"] <= max_phase]
+        if len(eligible) < self.num_random_actions:
+            eligible = list(RANDOM_ACTION_POOL)
+        picked = random.sample(eligible, k=min(self.num_random_actions, len(eligible)))
+        self.daily_random_actions = [
+            {
+                "id": f"rnd_{self.router.state.sol}_{i}_{item['key']}",
+                "category": "random",
+                "title": item["title"],
+                "action": item["action"],
+                "arg_mode": item["arg_mode"],
+                "param": item["param"],
+                "preferred_role": item["preferred_role"],
+                "cost": item["cost"],
+                "effect": item["effect"],
+                "used_today": False,
+            }
+            for i, item in enumerate(picked)
+        ]
+
+    def _mark_daily_card_used_locked(self, card_id: Optional[str], action_name: str) -> None:
+        for group in (self.daily_set_actions, self.daily_random_actions):
+            for card in group:
+                if card_id and card["id"] == card_id:
+                    card["used_today"] = True
+                    return
+        for group in (self.daily_set_actions, self.daily_random_actions):
+            for card in group:
+                if not card["used_today"] and card["action"] == action_name:
+                    card["used_today"] = True
+                    return
 
     def _compute_unlocks_locked(self) -> Dict[str, Any]:
         state = self.router.state
@@ -206,13 +458,12 @@ class MissionSession:
                 if announce:
                     self.router.state.log.append(f"CLEARANCE GRANTED: {info['name']} systems online.")
 
-    def execute_action(self, action: str, args: List[Any]) -> Dict[str, Any]:
+    def execute_action(self, action: str, args: List[Any], card_id: Optional[str] = None) -> Dict[str, Any]:
         with self.lock:
             state = self.router.state
             unlocks = self._compute_unlocks_locked()
             sys_locks = unlocks["systems"]
 
-            # Enforce permanent, stable crew roles
             if action in ("assign_job", "university_train"):
                 return {
                     "ok": False,
@@ -224,6 +475,29 @@ class MissionSession:
                 self.aborted = True
                 state.log.append("Mission aborted by Flight Director.")
                 return {"ok": True, "message": "Mission aborted.", "state": self._serialize_locked()}
+
+            if action == "reroll_random_actions":
+                self._roll_daily_actions_locked()
+                msg = f"Refreshed {self.num_random_actions} random daily directives for Sol {state.sol}."
+                state.log.append(msg)
+                return {"ok": True, "message": msg, "state": self._serialize_locked()}
+
+            if action == "reassign_building_worker":
+                try:
+                    target_b_idx = int(args[0])
+                    w_idx = int(args[1])
+                    if not (0 <= target_b_idx < len(state.buildings)) or not (0 <= w_idx < len(state.workers)):
+                        return {"ok": False, "message": "Invalid building or worker index.", "state": self._serialize_locked()}
+                    worker = state.workers[w_idx]
+                    old_bld = getattr(worker, "assigned_building", None)
+                    if old_bld is not None:
+                        old_idx = state.buildings.index(old_bld)
+                        self.router.execute("unstaff_building", old_idx, w_idx)
+                    ok = self.router.execute("staff_building", target_b_idx, w_idx)
+                    last_msg = state.log[-1] if state.log else "Worker assigned."
+                    return {"ok": bool(ok), "message": last_msg, "state": self._serialize_locked()}
+                except Exception as err:
+                    return {"ok": False, "message": f"{type(err).__name__}: {err}", "state": self._serialize_locked()}
 
             gated_actions = {
                 "mine": ("mining_refining", "Phase II (Sol 3 or 40 Science)"),
@@ -293,6 +567,7 @@ class MissionSession:
                     if self._compute_unlocks_locked()["max_phase"] > phase_before:
                         halt_reason = " Halted for new system clearance."
                         break
+                self._roll_daily_actions_locked()
                 return {
                     "ok": True,
                     "message": f"Advanced {ran} Sol(s).{halt_reason}",
@@ -303,9 +578,13 @@ class MissionSession:
             try:
                 result = self.router.execute(action, *args)
                 self._evaluate_unlocks_locked(announce=True)
+                if action == "advance_sol" and result:
+                    self._roll_daily_actions_locked()
                 new_entries = state.log[before_len:]
                 msg = new_entries[-1] if new_entries else f"Executed {action}."
                 ok = True if result is None else bool(result)
+                if ok:
+                    self._mark_daily_card_used_locked(card_id, action)
                 return {"ok": ok, "message": msg, "state": self._serialize_locked()}
             except Exception as err:
                 return {"ok": False, "message": f"{type(err).__name__}: {err}", "state": self._serialize_locked()}
@@ -409,12 +688,14 @@ class MissionSession:
             skills = w.getSkills()
             debuffs = w.getDebuffs()
             profile = ROLE_PROFILES.get(job_name, ROLE_PROFILES["Unassigned"])
+            assigned_bld = getattr(w, "assigned_building", None)
+            assigned_bld_idx = state.buildings.index(assigned_bld) if (assigned_bld and assigned_bld in state.buildings) else -1
             if getattr(w, "retired", False):
                 status = "Retired"
             elif w.getHealth() <= 0:
                 status = "Deceased"
-            elif getattr(w, "assigned_building", None) is not None:
-                status = f"Staffed @ {w.assigned_building.name}"
+            elif assigned_bld is not None:
+                status = f"Staffed @ {assigned_bld.name}"
             elif w.isAvailable():
                 status = "Ready"
             else:
@@ -432,7 +713,8 @@ class MissionSession:
                 "role_bonus": profile["bonus"],
                 "available": bool(w.isAvailable()),
                 "retired": bool(getattr(w, "retired", False)),
-                "assigned_building": w.assigned_building.name if getattr(w, "assigned_building", None) else None,
+                "assigned_building": assigned_bld.name if assigned_bld else None,
+                "assigned_building_index": assigned_bld_idx,
                 "status": status,
                 "role_skill": round(float(skills[p_idx]), 1),
                 "role_debuff": round(float(debuffs[p_idx]), 1),
@@ -514,6 +796,12 @@ class MissionSession:
             "crisis_risk_pct": int(round(state.hazard_manager.last_risk_score * 100)),
             "avg_safety": round(avg_safety, 1),
             "unlocks": unlocks,
+            "daily_actions": {
+                "num_set_actions": self.num_set_actions,
+                "num_random_actions": self.num_random_actions,
+                "set": self.daily_set_actions,
+                "random": self.daily_random_actions,
+            },
             "mission_over": mission_over,
             "mission_status": mission_status,
             "mission_reason": mission_reason,
@@ -658,14 +946,10 @@ HTML_PAGE = """<!DOCTYPE html>
     opacity: 0;
     animation: titleFadeIn 1s ease 2.45s forwards;
   }
-  @keyframes titleFadeIn {
-    to { opacity: 1; }
-  }
-  @keyframes titleScaleIn {
-    to { opacity: 1; transform: scale(1); }
-  }
+  @keyframes titleFadeIn { to { opacity: 1; } }
+  @keyframes titleScaleIn { to { opacity: 1; transform: scale(1); } }
 
-  /* ==================== CREW BRIEFING & TUTORIAL SPOTLIGHTS ==================== */
+  /* ==================== TUTORIAL SPOTLIGHT & BANNER ==================== */
   .tutorial-spotlight {
     position: relative;
     z-index: 45;
@@ -700,17 +984,8 @@ HTML_PAGE = """<!DOCTYPE html>
     border-radius: 4px;
     letter-spacing: 0.8px;
   }
-  .guided-title {
-    font-size: 14px;
-    font-weight: 700;
-    color: #fff;
-    margin-left: 8px;
-  }
-  .guided-body {
-    font-size: 12.5px;
-    color: #bae6fd;
-    margin-top: 4px;
-  }
+  .guided-title { font-size: 14px; font-weight: 700; color: #fff; margin-left: 8px; }
+  .guided-body { font-size: 12.5px; color: #bae6fd; margin-top: 4px; }
 
   /* ==================== CONSISTENT FLIGHT CONSOLE UI ==================== */
   .topbar {
@@ -1004,7 +1279,7 @@ HTML_PAGE = """<!DOCTYPE html>
     border: 1px solid var(--border-strong);
     border-radius: 8px;
     padding: 18px 20px;
-    max-width: 760px;
+    max-width: 780px;
     width: 100%;
     max-height: 90vh;
     overflow-y: auto;
@@ -1083,7 +1358,7 @@ HTML_PAGE = """<!DOCTYPE html>
     </div>
 
     <div class="notice-strip" style="margin-top:8px;">
-      <strong>How Staffing Works:</strong> Your specialists start assigned to core life-support buildings so your base runs automatically. To use a specialist for a manual shift or field expedition, click their badge in <strong>2. Buildings &amp; Staffing</strong> to unstaff them first.
+      <strong>How Staffing Works:</strong> Your specialists start assigned to core life-support buildings so your base runs automatically. To use a specialist for a daily action or field shift, open <strong>2. Buildings &amp; Staffing</strong> and click <strong>See Workers &amp; Put to Work</strong>.
     </div>
 
     <div class="grid-2col" id="crewIntroCards" style="margin-top:10px;"></div>
@@ -1094,6 +1369,33 @@ HTML_PAGE = """<!DOCTYPE html>
         <button onclick="closeCrewIntro(false)">Enter Console Without Tutorial</button>
         <button class="btn-mars" style="padding:8px 16px;" onclick="closeCrewIntro(true)">Start Interactive Tutorial &rarr;</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== BUILDING WORKERS & ASSIGNMENT MODAL ==================== -->
+<div class="modal-wrap" id="bldWorkersModal">
+  <div class="modal-box" style="max-width:740px;">
+    <div class="panel-header">
+      <div>
+        <h2 id="bwmTitle">BUILDING WORKFORCE &amp; STAFFING</h2>
+        <div class="label-mono" id="bwmSubtitle"></div>
+      </div>
+      <button onclick="closeBuildingWorkersModal()">Close [ESC]</button>
+    </div>
+
+    <div class="notice-strip" style="margin-top:8px;">
+      <strong>Put Workers to Work:</strong> Only specialists matching this building's required professions can be assigned here. Reassigning a worker automatically unstaffs them from their previous post.
+    </div>
+
+    <div style="margin-top:10px;">
+      <div class="label-mono" style="font-weight:700;color:#e2e8f0;margin-bottom:6px;">CURRENTLY ASSIGNED TO THIS BUILDING</div>
+      <div id="bwmAssignedList"></div>
+    </div>
+
+    <div style="margin-top:14px;">
+      <div class="label-mono" style="font-weight:700;color:#e2e8f0;margin-bottom:6px;">ALL COLONY SPECIALISTS</div>
+      <div class="grid-2col" id="bwmAllWorkersList"></div>
     </div>
   </div>
 </div>
@@ -1139,7 +1441,7 @@ HTML_PAGE = """<!DOCTYPE html>
 <div class="guided-banner" id="guidedBanner">
   <div>
     <div>
-      <span class="step-counter" id="tutStepTag">STEP 1 OF 6</span>
+      <span class="step-counter" id="tutStepTag">STEP 1 OF 7</span>
       <span class="guided-title" id="tutStepTitle">Review Life Support Vitals</span>
     </div>
     <div class="guided-body" id="tutStepDesc"></div>
@@ -1156,9 +1458,10 @@ HTML_PAGE = """<!DOCTYPE html>
     <nav class="nav-tabs" id="navTabs">
       <button class="nav-tab active" data-pane="ops" onclick="selectPane('ops', this)">1. Life Support &amp; Stockpile</button>
       <button class="nav-tab" data-pane="buildings" onclick="selectPane('buildings', this)">2. Buildings &amp; Staffing</button>
-      <button class="nav-tab" data-pane="crew" onclick="selectPane('crew', this)">3. Crew Roster</button>
-      <button class="nav-tab" data-pane="construct" onclick="selectPane('construct', this)">4. Construct Facilities</button>
-      <button class="nav-tab" data-pane="field" onclick="selectPane('field', this)">5. Field Ops &amp; Launches <span class="lock-tag" id="fieldLockTag">[PHASE II]</span></button>
+      <button class="nav-tab" data-pane="actions" onclick="selectPane('actions', this)">3. Actions (5 Set + 5 Random)</button>
+      <button class="nav-tab" data-pane="crew" onclick="selectPane('crew', this)">4. Crew Roster</button>
+      <button class="nav-tab" data-pane="construct" onclick="selectPane('construct', this)">5. Construct Facilities</button>
+      <button class="nav-tab" data-pane="field" onclick="selectPane('field', this)">6. Field Ops &amp; Launches <span class="lock-tag" id="fieldLockTag">[PHASE II]</span></button>
     </nav>
 
     <!-- PANE 1: LIFE SUPPORT & STOCKPILE -->
@@ -1203,12 +1506,48 @@ HTML_PAGE = """<!DOCTYPE html>
     <!-- PANE 2: BUILDINGS & STAFFING -->
     <section class="view-pane" id="pane-buildings">
       <div class="notice-strip">
-        <strong>Step-by-Step Staffing:</strong> Buildings marked <strong>OP</strong> are staffed and producing every Sol. Click any specialist button (e.g. <code>[5] Name (Engineer) &times;</code>) to free them for manual shifts, or select a Ready matching specialist to staff an <strong>IDLE</strong> building.
+        <strong>Buildings Menu:</strong> Click <strong>See Workers &amp; Put to Work</strong> on any building to inspect its staff, view all colony specialists, and put eligible workers to work on that building.
       </div>
       <div class="grid-2col" id="buildingsGrid"></div>
     </section>
 
-    <!-- PANE 3: CREW ROSTER -->
+    <!-- PANE 3: ACTIONS MENU (5 SET + 5 RANDOM DAILY ACTIONS) -->
+    <section class="view-pane" id="pane-actions">
+      <div class="panel" style="margin-bottom:8px;">
+        <div class="panel-header">
+          <span class="panel-title" id="actionsHeaderTitle">DAILY COLONY ACTIONS &mdash; SOL 1</span>
+          <div class="btn-group">
+            <span class="status-pill op" id="setActionsCounter">5 SET ACTIONS</span>
+            <span class="status-pill role" id="rndActionsCounter">5 RANDOM ACTIONS</span>
+          </div>
+        </div>
+        <div class="label-mono">Choose any Set Action or Random Daily Directive below to immediately activate it. Random actions refresh every Sol.</div>
+        <div id="actionsWorkerNotice" style="margin-top:8px;"></div>
+        <div class="ctrl-row">
+          <label class="label-mono">Active Specialist for Worker Actions:</label>
+          <select id="selDailyActionWorker"></select>
+          <button onclick="sendAction('reroll_random_actions', [])">Refresh 5 Random Actions</button>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-bottom:8px;">
+        <div class="panel-header">
+          <span class="panel-title">STANDARD DAILY SET ACTIONS (5)</span>
+          <span class="label-mono">Available Every Sol</span>
+        </div>
+        <div class="grid-2col" id="setActionsGrid"></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">RANDOM DAILY DIRECTIVES (5)</span>
+          <span class="label-mono">Rolled Specifically for Today</span>
+        </div>
+        <div class="grid-2col" id="randomActionsGrid"></div>
+      </div>
+    </section>
+
+    <!-- PANE 4: CREW ROSTER -->
     <section class="view-pane" id="pane-crew">
       <div class="notice-strip">
         <strong>Permanent Crew Specialties:</strong> Each astronaut is locked to their trained mission role (Doctor, Engineer, Biologist, Geologist, or Pilot). Unstaffed crew can rest to heal, study to boost role skill, or visit the hospital.
@@ -1216,7 +1555,7 @@ HTML_PAGE = """<!DOCTYPE html>
       <div class="grid-2col" id="crewGrid"></div>
     </section>
 
-    <!-- PANE 4: CONSTRUCT FACILITIES -->
+    <!-- PANE 5: CONSTRUCT FACILITIES -->
     <section class="view-pane" id="pane-construct">
       <div class="panel" style="margin-bottom:8px;">
         <div class="panel-header">
@@ -1233,7 +1572,7 @@ HTML_PAGE = """<!DOCTYPE html>
       <div class="grid-2col" id="catalogGrid"></div>
     </section>
 
-    <!-- PANE 5: FIELD OPS & LAUNCHES -->
+    <!-- PANE 6: FIELD OPS & LAUNCHES -->
     <section class="view-pane" id="pane-field">
       <div id="fieldLockedBanner"></div>
       <div id="fieldWorkerNotice"></div>
@@ -1291,7 +1630,12 @@ HTML_PAGE = """<!DOCTYPE html>
     </div>
 
     <div class="manual-section">
-      <h3>2. PERMANENT CREW SPECIALTIES</h3>
+      <h3>2. DAILY ACTIONS MENU (5 SET + 5 RANDOM)</h3>
+      <p style="margin:4px 0;">Each Sol provides <strong>5 Set Actions</strong> (core life-support, maintenance, logistics, rations, and crisis containment) plus <strong>5 Random Daily Actions</strong> tailored to your current clearance phase. Selecting any action activates it immediately.</p>
+    </div>
+
+    <div class="manual-section">
+      <h3>3. PERMANENT CREW SPECIALTIES</h3>
       <table class="manual-table">
         <tr><th>Role</th><th>Assigned Buildings</th><th>Field Bonus &amp; Crisis Duty</th></tr>
         <tr><td><strong>Doctor</strong></td><td>Habitation Dome, Medical Bay, Hospital, Recreation</td><td>Seals Ammonia Coolant Leaks &amp; restores crew health.</td></tr>
@@ -1303,23 +1647,13 @@ HTML_PAGE = """<!DOCTYPE html>
     </div>
 
     <div class="manual-section">
-      <h3>3. PROGRESSIVE CLEARANCE UNLOCKS</h3>
+      <h3>4. PROGRESSIVE CLEARANCE UNLOCKS</h3>
       <table class="manual-table">
         <tr><th>Phase</th><th>Unlock Condition</th><th>Capabilities Unlocked</th></tr>
-        <tr><td>Phase I</td><td>Sol 1 (Landing)</td><td>Life Support (MOXIE, Hydroponics, Atmosphere), Building Staffing, Crew Roster, Basic Habitat &amp; Utility Construction.</td></tr>
+        <tr><td>Phase I</td><td>Sol 1 (Landing)</td><td>Life Support (MOXIE, Hydroponics, Atmosphere), Building Staffing, Daily Actions, Crew Roster, Basic Construction.</td></tr>
         <tr><td>Phase II</td><td>Sol 3 or 40 Science</td><td>Regolith &amp; Ice Mining, Sabatier Fuel Synthesis, Material Refining, Rover &amp; Drone Recon.</td></tr>
         <tr><td>Phase III</td><td>Sol 6 or 120 Science</td><td>Research Lab Point Synthesis, Communications Hub &amp; Satellite Dish.</td></tr>
         <tr><td>Phase IV</td><td>Sol 10 or 250 Science</td><td>Spacecraft &amp; Vehicle Manufacturing and Orbital Satellite / Rocket Launches.</td></tr>
-      </table>
-    </div>
-
-    <div class="manual-section">
-      <h3>4. EMERGENCY CRISIS RESOLUTION</h3>
-      <table class="manual-table">
-        <tr><th>Crisis</th><th>Effect</th><th>Required Resources &amp; Ready Crew</th></tr>
-        <tr><td>Grid Overload</td><td>Drains 35% stored power &amp; trips PowerPlants off.</td><td>50 Aluminum + 2 ready Engineers</td></tr>
-        <tr><td>Ammonia Coolant Leak</td><td>10 initial toxic damage + escalating damage/Sol.</td><td>10 Plastic + 15 Water + 1 ready Doctor</td></tr>
-        <tr><td>Micrometeorite Breach</td><td>Reduces building safety (-35%) &amp; vents Oxygen.</td><td>80 Steel + 80 Dirt + 1 Geologist + 1 Engineer</td></tr>
       </table>
     </div>
   </div>
@@ -1342,41 +1676,48 @@ let STATE = null;
 let chosenEnv = 'mars';
 let reportShownSol = null;
 let tutorialIdx = -1;
+let activeBuildingModalIdx = null;
 
 const TUTORIAL_FLOW = [
   {
     title: 'Step 1: Monitor Your 4 Core Life-Support Vitals',
-    desc: 'Look at Food, Water, Power, and Oxygen at the top. Every Sol your crew consumes rations and your base draws Power. Click "Next Step" to inspect your buildings.',
+    desc: 'Look at Food, Water, Power, and Oxygen at the top. Every Sol your crew consumes rations and your base draws Power. Click "Next Step" to inspect Buildings.',
     pane: 'ops',
     spotId: 'vitalsGrid'
   },
   {
-    title: 'Step 2: Open Buildings & Staffing',
-    desc: 'Click the highlighted "2. Buildings & Staffing" tab to see which facilities are Operational (OP) and which specialists are staffed inside them.',
+    title: 'Step 2: Open 2. Buildings & Staffing',
+    desc: 'Click the highlighted "2. Buildings & Staffing" tab to manage which specialists are working inside each colony building.',
     pane: 'ops',
     spotSelector: '.nav-tab[data-pane="buildings"]'
   },
   {
-    title: 'Step 3: Free a Specialist for Field Shifts',
-    desc: 'All 6 crew members start staffed inside buildings. Click the unstaff button on [2] MOXIE Oxygen Generator (or any staffed badge) so that Engineer becomes READY.',
+    title: 'Step 3: Open "See Workers & Put to Work" on a Building',
+    desc: 'Click "See Workers & Put to Work" on [6] Colony Steel Mill (or any building) to view all workers and assign or unstaff specialists.',
     pane: 'buildings',
-    spotSelector: '#buildingsGrid .panel:nth-child(3) .ctrl-row button'
+    spotSelector: '#buildingsGrid .panel:last-child .btn-primary'
   },
   {
-    title: 'Step 4: Run a Manual Life-Support Shift',
-    desc: 'Now that you have a Ready Engineer, click "Run MOXIE (+O2)" below to convert CO2 and Electricity into emergency Oxygen.',
-    pane: 'ops',
-    spotId: 'btnMoxie'
+    title: 'Step 4: Open the New "3. Actions" Menu',
+    desc: 'Click the highlighted "3. Actions (5 Set + 5 Random)" tab to view today\'s 5 Set Actions and 5 Random Daily Directives.',
+    pane: 'buildings',
+    spotSelector: '.nav-tab[data-pane="actions"]'
   },
   {
-    title: 'Step 5: Advance 1 Sol (Simulate 24 Hours)',
-    desc: 'Click "Advance 1 Sol" in the top bar. Automated buildings will produce resources, Logistics will transfer them, and you will see your Net Balance per Sol.',
-    pane: 'ops',
+    title: 'Step 5: Activate Any Daily Action',
+    desc: 'Click "Activate Action" on any Set Action (such as Balance Habitat Atmosphere) or Random Daily Directive to execute it immediately.',
+    pane: 'actions',
+    spotId: 'setActionsGrid'
+  },
+  {
+    title: 'Step 6: Advance 1 Sol (Simulate 24 Hours)',
+    desc: 'Click "Advance 1 Sol" in the top bar. Automated buildings will produce resources, daily actions will refresh, and you will see your Net Balance per Sol.',
+    pane: 'actions',
     spotId: 'btnAdvance1'
   },
   {
-    title: 'Step 6: Expand & Unlock New Phases',
-    desc: 'Notice your daily Food/Power net balance. Open "4. Construct Facilities" to build another Food Factory or Power Plant, and reach Sol 3 to unlock Phase II Mining!',
+    title: 'Step 7: Expand & Unlock New Phases',
+    desc: 'Open "5. Construct Facilities" to build another Food Factory or Power Plant, and reach Sol 3 to unlock Phase II Mining & Rovers!',
     pane: 'ops',
     spotSelector: '.nav-tab[data-pane="construct"]'
   }
@@ -1416,6 +1757,86 @@ function renderCrewIntro() {
       </div>
     </div>
   `).join('');
+}
+
+function openBuildingWorkersModal(bIdx) {
+  activeBuildingModalIdx = bIdx;
+  renderBuildingWorkersModal();
+  document.getElementById('bldWorkersModal').classList.add('open');
+  onTutorialEvent('OPEN_BLD_WORKERS');
+}
+
+function closeBuildingWorkersModal() {
+  activeBuildingModalIdx = null;
+  document.getElementById('bldWorkersModal').classList.remove('open');
+}
+
+function renderBuildingWorkersModal() {
+  if (activeBuildingModalIdx === null || !STATE) return;
+  const b = STATE.buildings[activeBuildingModalIdx];
+  if (!b) return closeBuildingWorkersModal();
+
+  const reqEntries = Object.entries(b.required_professions);
+  const reqText = reqEntries.map(([p, [lo, hi]]) => `${p} (min ${lo}, max ${hi})`).join(', ') || 'None';
+  const allowedProfs = Object.keys(b.required_professions);
+
+  document.getElementById('bwmTitle').textContent = `${b.name} — Workers & Staffing`;
+  document.getElementById('bwmSubtitle').textContent =
+    `${b.type} | Status: ${b.is_on ? (b.is_operational ? 'OPERATIONAL' : 'IDLE') : 'OFF'} | Staff: ${b.workers_count}/${b.max_workers} | Required: ${reqText}`;
+
+  const assignedEl = document.getElementById('bwmAssignedList');
+  if (!b.assigned_workers.length) {
+    assignedEl.innerHTML = `<div class="notice-strip">No workers are currently working in ${b.name}. Select an eligible specialist below to put them to work.</div>`;
+  } else {
+    assignedEl.innerHTML = `<div class="grid-2col">` + b.assigned_workers.map(w => `
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">[${w.index}] ${w.name}</span>
+          <span class="status-pill op">${w.profession} &bull; HP ${w.health}%</span>
+        </div>
+        <div class="ctrl-row">
+          <button class="btn-warn" onclick="sendAction('unstaff_building', [${b.index}, ${w.index}])">Unstaff Worker</button>
+        </div>
+      </div>
+    `).join('') + `</div>`;
+  }
+
+  document.getElementById('bwmAllWorkersList').innerHTML = STATE.workers.map(w => {
+    const alreadyHere = b.assigned_workers.some(aw => aw.index === w.index);
+    const roleMatches = allowedProfs.includes(w.profession);
+    const isFull = b.workers_count >= b.max_workers;
+    const inactive = w.retired || w.health <= 0;
+
+    let actionBtn = '';
+    if (alreadyHere) {
+      actionBtn = `<span class="status-pill op">WORKING HERE</span>`;
+    } else if (inactive) {
+      actionBtn = `<span class="status-pill off">${w.status}</span>`;
+    } else if (!roleMatches) {
+      actionBtn = `<span class="label-mono">Needs ${allowedProfs.join('/')}</span>`;
+    } else if (isFull) {
+      actionBtn = `<span class="label-mono">Building Full</span>`;
+    } else if (w.available) {
+      actionBtn = `<button class="btn-ok" onclick="sendAction('staff_building', [${b.index}, ${w.index}])">Put to Work</button>`;
+    } else if (w.assigned_building) {
+      actionBtn = `<button class="btn-primary" onclick="sendAction('reassign_building_worker', [${b.index}, ${w.index}])">Reassign &amp; Put to Work</button>`;
+    } else {
+      actionBtn = `<span class="status-pill idle">${w.status}</span>`;
+    }
+
+    return `
+      <div class="panel">
+        <div>
+          <div class="panel-header">
+            <span class="panel-title">[${w.index}] ${w.name}</span>
+            <span class="status-pill role">${w.profession}</span>
+          </div>
+          <div class="label-mono">HP: ${w.health}% | Skill: ${w.role_skill} | ${w.status}</div>
+        </div>
+        <div class="ctrl-row">${actionBtn}</div>
+      </div>
+    `;
+  }).join('');
 }
 
 function clearSpotlights() {
@@ -1464,16 +1885,17 @@ function onTutorialEvent(evt) {
   if (tutorialIdx === 1 && evt === 'OPEN_BUILDINGS') {
     tutorialIdx = 2;
     renderTutorial();
-  } else if (tutorialIdx === 2 && evt === 'unstaff_building') {
+  } else if (tutorialIdx === 2 && (evt === 'OPEN_BLD_WORKERS' || evt === 'staff_building' || evt === 'reassign_building_worker')) {
     tutorialIdx = 3;
-    const tabBtn = document.querySelector('.nav-tab[data-pane="ops"]');
-    if (tabBtn) selectPane('ops', tabBtn, true);
     renderTutorial();
-  } else if (tutorialIdx === 3 && ['run_moxie', 'hydroponics', 'food_refinery'].includes(evt)) {
+  } else if (tutorialIdx === 3 && evt === 'OPEN_ACTIONS') {
     tutorialIdx = 4;
     renderTutorial();
-  } else if (tutorialIdx === 4 && ['advance_sol', 'advance_sols'].includes(evt)) {
+  } else if (tutorialIdx === 4 && evt === 'DAILY_ACTION_ACTIVATED') {
     tutorialIdx = 5;
+    renderTutorial();
+  } else if (tutorialIdx === 5 && ['advance_sol', 'advance_sols'].includes(evt)) {
+    tutorialIdx = 6;
     renderTutorial();
   }
 }
@@ -1509,17 +1931,54 @@ async function loadState() {
   renderConsole();
 }
 
-async function sendAction(action, args = []) {
+async function sendAction(action, args = [], cardId = null) {
   const res = await fetch('/api/action', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action, args })
+    body: JSON.stringify({ action, args, card_id: cardId })
   });
   const data = await res.json();
   STATE = data.state;
   toast(data.message, !data.ok);
   renderConsole();
-  if (data.ok) onTutorialEvent(action);
+  if (activeBuildingModalIdx !== null) renderBuildingWorkersModal();
+  if (data.ok) {
+    if (cardId) onTutorialEvent('DAILY_ACTION_ACTIVATED');
+    onTutorialEvent(action);
+  }
+}
+
+function activateDailyCard(category, idx) {
+  if (!STATE || !STATE.daily_actions) return;
+  const list = category === 'set' ? STATE.daily_actions.set : STATE.daily_actions.random;
+  const card = list[idx];
+  if (!card) return;
+
+  if (card.arg_mode === 'none') {
+    sendAction(card.action, [], card.id);
+    return;
+  }
+
+  const readyCrew = STATE.workers.filter(w => w.available);
+  const selEl = document.getElementById('selDailyActionWorker');
+  let chosenWorkerIdx = selEl ? parseInt(selEl.value, 10) : NaN;
+
+  if (card.preferred_role) {
+    const match = readyCrew.find(w => w.profession === card.preferred_role);
+    if (match) chosenWorkerIdx = match.index;
+  }
+  if (isNaN(chosenWorkerIdx) && readyCrew.length > 0) {
+    chosenWorkerIdx = readyCrew[0].index;
+  }
+  if (isNaN(chosenWorkerIdx)) {
+    return toast('No Ready specialist available. Click "Unstaff 1 Specialist Now" first.', true);
+  }
+
+  if (card.arg_mode === 'worker') {
+    sendAction(card.action, [chosenWorkerIdx], card.id);
+  } else if (card.arg_mode === 'worker_param') {
+    sendAction(card.action, [chosenWorkerIdx, card.param], card.id);
+  }
 }
 
 function quickUnstaffFirst() {
@@ -1532,21 +1991,21 @@ function quickUnstaffFirst() {
 
 function runWithWorker(action, selectId) {
   const idx = parseInt(document.getElementById(selectId).value, 10);
-  if (isNaN(idx)) return toast('No Ready specialist available. Click "Unstaff 1 Specialist" first.', true);
+  if (isNaN(idx)) return toast('No Ready specialist available. Unstaff 1 specialist first.', true);
   sendAction(action, [idx]);
 }
 
 function runWithWorkerCrop(action) {
   const idx = parseInt(document.getElementById('selOpsWorker').value, 10);
   const crop = document.getElementById('selCrop').value;
-  if (isNaN(idx)) return toast('No Ready specialist available. Click "Unstaff 1 Specialist" first.', true);
+  if (isNaN(idx)) return toast('No Ready specialist available. Unstaff 1 specialist first.', true);
   sendAction(action, [idx, crop]);
 }
 
 function runWithWorkerVal(action, wSelId, vSelId) {
   const idx = parseInt(document.getElementById(wSelId).value, 10);
   const val = document.getElementById(vSelId).value;
-  if (isNaN(idx)) return toast('No Ready specialist available. Click "Unstaff 1 Specialist" first.', true);
+  if (isNaN(idx)) return toast('No Ready specialist available. Unstaff 1 specialist first.', true);
   sendAction(action, [idx, val]);
 }
 
@@ -1555,7 +2014,10 @@ function selectPane(name, btn, skipTutorialHook = false) {
   document.querySelectorAll('.view-pane').forEach(p => p.classList.remove('active'));
   btn.classList.add('active');
   document.getElementById('pane-' + name).classList.add('active');
-  if (!skipTutorialHook && name === 'buildings') onTutorialEvent('OPEN_BUILDINGS');
+  if (!skipTutorialHook) {
+    if (name === 'buildings') onTutorialEvent('OPEN_BUILDINGS');
+    if (name === 'actions') onTutorialEvent('OPEN_ACTIONS');
+  }
   if (tutorialIdx >= 0) setTimeout(() => applySpotlight(TUTORIAL_FLOW[tutorialIdx]), 60);
 }
 
@@ -1573,6 +2035,7 @@ window.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     closeManual();
     closeSetupModal();
+    closeBuildingWorkersModal();
   }
 });
 
@@ -1659,17 +2122,19 @@ function renderConsole() {
   document.getElementById('readyCountLabel').textContent = `${readyCrew.length} Ready Crew`;
   const workerNotice = readyCrew.length === 0
     ? `<div class="notice-strip" style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
-         <span>All active specialists are staffed inside buildings. Free a specialist to run manual shifts or expeditions.</span>
+         <span>All active specialists are currently staffed inside buildings. Free a specialist to run worker actions.</span>
          <button class="btn-primary" onclick="quickUnstaffFirst()">Unstaff 1 Specialist Now</button>
        </div>`
     : '';
   document.getElementById('opsWorkerNotice').innerHTML = workerNotice;
+  document.getElementById('actionsWorkerNotice').innerHTML = workerNotice;
   document.getElementById('fieldWorkerNotice').innerHTML = workerNotice;
 
   const wOptions = readyCrew.length
     ? readyCrew.map(w => `<option value="${w.index}">[${w.index}] ${w.name} (${w.profession}, HP ${w.health})</option>`).join('')
     : '<option value="">No Ready Specialists (Unstaff 1 first)</option>';
   document.getElementById('selOpsWorker').innerHTML = wOptions;
+  document.getElementById('selDailyActionWorker').innerHTML = wOptions;
 
   const deltas = Object.entries(STATE.resources)
     .filter(([, r]) => r.net !== 0)
@@ -1683,31 +2148,17 @@ function renderConsole() {
       return `<div class="stock-cell"><span>${k}${d}</span><strong>${r.current}/${r.max}</strong></div>`;
     }).join('');
 
+  // Buildings Menu with "See Workers & Put to Work" button on every building
   document.getElementById('buildingsGrid').innerHTML = STATE.buildings.map(b => {
     const pillCls = !b.is_on ? 'off' : (b.is_operational ? 'op' : 'idle');
     const pillTxt = !b.is_on ? 'OFF' : (b.is_operational ? 'OP' : 'IDLE');
     const reqs = Object.entries(b.required_professions).map(([p, [lo, hi]]) => `${p} ${lo}-${hi}`).join(', ') || 'none';
     const local = Object.entries(b.local_storage).map(([k, v]) => `${k}: ${v.current}/${v.max}`).join(' | ');
-    const allowed = Object.keys(b.required_professions);
-    const eligible = readyCrew.filter(w => allowed.includes(w.profession));
-
-    const staffHtml = eligible.length
-      ? `<select id="stSel_${b.index}">${eligible.map(w => `<option value="${w.index}">[${w.index}] ${w.name} (${w.profession})</option>`).join('')}</select>
-         <button class="btn-ok" onclick="assignStaff(${b.index})">Assign Staff</button>`
-      : `<span class="label-mono">Needs Ready ${allowed.join('/')}</span>`;
-
     const badges = b.assigned_workers.map(w =>
-      `<button onclick="sendAction('unstaff_building', [${b.index}, ${w.index}])" title="Click to unstaff">[${w.index}] ${w.name} (${w.profession}) &times;</button>`
+      `<span class="status-pill role">[${w.index}] ${w.name} (${w.profession})</span>`
     ).join(' ');
 
     let extraHtml = '';
-    if ((b.kind === 'Producer' || b.kind === 'Farm') && readyCrew.length) {
-      extraHtml += `
-        <div class="ctrl-row">
-          <select id="shSel_${b.index}">${readyCrew.map(w => `<option value="${w.index}">[${w.index}] ${w.name}</option>`).join('')}</select>
-          <button onclick="manualShift(${b.index})">Manual Shift (15 Power)</button>
-        </div>`;
-    }
     if (b.kind === 'Farm') {
       const crops = ['lettuce', 'wheat', 'flax', 'sunflower'];
       extraHtml += `
@@ -1746,13 +2197,16 @@ function renderConsole() {
         <div>
           <div class="ctrl-row">${badges || '<span class="label-mono">No workers assigned</span>'}</div>
           <div class="ctrl-row">
-            ${staffHtml}
+            <button class="btn-primary" onclick="openBuildingWorkersModal(${b.index})">See Workers &amp; Put to Work (${b.workers_count}/${b.max_workers})</button>
             <button onclick="sendAction('toggle_building', [${b.index}])">${b.is_on ? 'Turn Off' : 'Turn On'}</button>
           </div>
           ${extraHtml}
         </div>
       </div>`;
   }).join('');
+
+  // Actions Menu (5 Set Actions + 5 Random Actions)
+  renderDailyActions();
 
   // Crew Roster (Stable Permanent Roles — no role changing)
   document.getElementById('crewGrid').innerHTML = STATE.workers.map(w => `
@@ -1761,7 +2215,7 @@ function renderConsole() {
         <div class="panel-header">
           <span class="panel-title">[${w.index}] ${w.name}</span>
           <div class="btn-group">
-            <span class="status-pill role">${w.profession} (FIXED)</span>
+            <span class="status-pill role">${w.profession} (PERMANENT)</span>
             <span class="status-pill ${w.available ? 'op' : 'idle'}">${w.status}</span>
           </div>
         </div>
@@ -1807,6 +2261,40 @@ function renderConsole() {
   }
 
   if (tutorialIdx >= 0) setTimeout(() => applySpotlight(TUTORIAL_FLOW[tutorialIdx]), 40);
+}
+
+function renderDailyActions() {
+  if (!STATE || !STATE.daily_actions) return;
+  const da = STATE.daily_actions;
+  document.getElementById('actionsHeaderTitle').textContent = `DAILY COLONY ACTIONS — SOL ${STATE.sol}`;
+  document.getElementById('setActionsCounter').textContent = `${da.num_set_actions} SET ACTIONS`;
+  document.getElementById('rndActionsCounter').textContent = `${da.num_random_actions} RANDOM ACTIONS`;
+
+  const renderCard = (card, idx, category) => {
+    const roleTag = card.preferred_role ? ` | Specialist: ${card.preferred_role}` : '';
+    const statusBadge = card.used_today
+      ? `<span class="status-pill op">ACTIVATED TODAY</span>`
+      : `<span class="status-pill role">${category === 'set' ? 'SET ACTION' : 'DAILY RANDOM'}</span>`;
+    const btnClass = category === 'set' ? 'btn-primary' : 'btn-mars';
+    return `
+      <div class="panel">
+        <div>
+          <div class="panel-header">
+            <span class="panel-title">${idx + 1}. ${card.title}</span>
+            ${statusBadge}
+          </div>
+          <div class="label-mono">Cost: ${card.cost}${roleTag}</div>
+          <div style="font-size:12px;color:#cbd5e1;margin-top:4px;">${card.effect}</div>
+        </div>
+        <div class="ctrl-row">
+          <button class="${btnClass}" onclick="activateDailyCard('${category}', ${idx})">${card.used_today ? 'Activate Again' : 'Activate Action'}</button>
+        </div>
+      </div>
+    `;
+  };
+
+  document.getElementById('setActionsGrid').innerHTML = da.set.map((c, i) => renderCard(c, i, 'set')).join('');
+  document.getElementById('randomActionsGrid').innerHTML = da.random.map((c, i) => renderCard(c, i, 'random')).join('');
 }
 
 function renderFieldOps(wOptions, u) {
@@ -1920,14 +2408,6 @@ function renderFieldOps(wOptions, u) {
   `;
 }
 
-function assignStaff(bIdx) {
-  const sel = document.getElementById('stSel_' + bIdx);
-  if (sel) sendAction('staff_building', [bIdx, parseInt(sel.value, 10)]);
-}
-function manualShift(bIdx) {
-  const sel = document.getElementById('shSel_' + bIdx);
-  if (sel) sendAction('operate_factory', [bIdx, [parseInt(sel.value, 10)]]);
-}
 function setFarm(bIdx) {
   sendAction('configure_farm', [
     bIdx,
@@ -2008,7 +2488,8 @@ def make_handler(session: MissionSession):
             if path == "/api/action":
                 action = str(data.get("action", ""))
                 args = list(data.get("args", []))
-                self._send_json(session.execute_action(action, args))
+                card_id = data.get("card_id")
+                self._send_json(session.execute_action(action, args, card_id=card_id))
             elif path == "/api/new_game":
                 state = session.new_mission(
                     space_key=str(data.get("space_key", "mars")),
