@@ -1,40 +1,97 @@
 import random
 from typing import Any, Callable, Dict, List
+import Resource_Class as resource_inventory
+from Building_file import (
+    building,
+    ResourceBuilding,
+    WaterExtractor,
+    OxygenGenerator,
+    CarbonDioxideGenerator,
+    NitrogenGenerator,
+    HydrogenGenerator,
+    FoodFactory,
+    PowerPlant,
+    FuelRefinery,
+    AluminumMine,
+    SteelMill,
+    SoilProcessor,
+    PlasticFactory,
+    GlassFactory,
+    CarFactory,
+    TruckFactory,
+    RoverFactory,
+    SatelliteFactory,
+    RocketFactory,
+    DroneFactory,
+    Farm,
+    IceMinor,
+    Habitation,
+    RecreationCenter,
+    Canteen,
+    LogisticsBuilding,
+    ResearchBuilding,
+)
+from hazards import HazardManager
 
 
 SPACE_ENVIRONMENTS = {
     'orbit': {
         'label': 'Low Earth Orbit Station',
         'solar_multiplier': 1.35,
-        'power_per_space': 4.0,
-        'o2_leak_per_space': 0.25,
-        'n2_leak_per_space': 0.20,
+        'power_per_100m3': 3.5,
+        'o2_leak_per_100m3': 0.25,
+        'n2_leak_per_100m3': 0.20,
         'hazard_chance': 0.20,
     },
     'moon': {
         'label': 'Lunar South Pole Base',
         'solar_multiplier': 1.15,
-        'power_per_space': 6.0,
-        'o2_leak_per_space': 0.30,
-        'n2_leak_per_space': 0.25,
+        'power_per_100m3': 5.5,
+        'o2_leak_per_100m3': 0.30,
+        'n2_leak_per_100m3': 0.25,
         'hazard_chance': 0.25,
     },
     'mars': {
         'label': 'Mars Jezero Crater Base',
         'solar_multiplier': 0.85,
-        'power_per_space': 5.0,
-        'o2_leak_per_space': 0.20,
-        'n2_leak_per_space': 0.15,
+        'power_per_100m3': 4.5,
+        'o2_leak_per_100m3': 0.20,
+        'n2_leak_per_100m3': 0.15,
         'hazard_chance': 0.25,
     },
     'deep_space': {
         'label': 'Deep Space Transit Habitat',
         'solar_multiplier': 0.45,
-        'power_per_space': 8.0,
-        'o2_leak_per_space': 0.35,
-        'n2_leak_per_space': 0.30,
+        'power_per_100m3': 7.5,
+        'o2_leak_per_100m3': 0.35,
+        'n2_leak_per_100m3': 0.30,
         'hazard_chance': 0.30,
     },
+}
+
+
+BUILDING_DAILY_PROFILES = {
+    'PowerPlant': ({}, 95.0),
+    'WaterExtractor': ({'electricity': 15.0}, 24.0),
+    'IceMinor': ({'electricity': 18.0}, 30.0),
+    'OxygenGenerator': ({'electricity': 18.0, 'CO2': 4.0}, 8.0),
+    'CarbonDioxideGenerator': ({'electricity': 10.0}, 10.0),
+    'NitrogenGenerator': ({'electricity': 12.0}, 6.0),
+    'HydrogenGenerator': ({'electricity': 16.0, 'water': 6.0}, 8.0),
+    'FoodFactory': ({'water': 10.0, 'electricity': 18.0}, 15000.0),
+    'FuelRefinery': ({'electricity': 18.0, 'Hydrogen': 6.0, 'CO2': 4.0}, 20.0),
+    'AluminumMine': ({'electricity': 15.0}, 12.0),
+    'SteelMill': ({'electricity': 18.0, 'dirt': 12.0}, 12.0),
+    'SoilProcessor': ({'electricity': 12.0}, 30.0),
+    'PlasticFactory': ({'electricity': 14.0, 'CO2': 4.0, 'Hydrogen': 4.0}, 10.0),
+    'GlassFactory': ({'electricity': 14.0, 'dirt': 12.0}, 10.0),
+    'Farm': ({'water': 8.0, 'electricity': 10.0}, 6.0),
+    'CarFactory': ({'electricity': 25.0, 'aluminum': 20.0, 'steel': 20.0}, 1.0),
+    'TruckFactory': ({'electricity': 30.0, 'aluminum': 25.0, 'steel': 30.0}, 1.0),
+    'RoverFactory': ({'electricity': 30.0, 'aluminum': 25.0, 'steel': 20.0}, 1.0),
+    'SatelliteFactory': ({'electricity': 35.0, 'aluminum': 20.0, 'glass': 15.0}, 1.0),
+    'RocketFactory': ({'electricity': 50.0, 'aluminum': 60.0, 'steel': 60.0}, 1.0),
+    'DroneFactory': ({'electricity': 20.0, 'aluminum': 12.0, 'plastic': 8.0}, 1.0),
 }
 
 
@@ -46,6 +103,11 @@ class GameState:
         buildings: List[Any],
         space_key: str = 'mars',
     ):
+        if not hasattr(resource_inventory, 'research'):
+            resource_inventory.research = resource_inventory.resources(0, 10000)
+        if 'research' not in resource_pool:
+            resource_pool['research'] = resource_inventory.research
+
         self.resources = resource_pool
         self.workers = workers
         self.buildings = buildings
@@ -55,6 +117,7 @@ class GameState:
         self.science_points = 0.0
         self.active_satellites = 0
         self.daily_report: Dict[str, Dict[str, float]] = {}
+        self.hazard_manager = HazardManager()
         self.log: List[str] = []
 
 
@@ -439,8 +502,53 @@ def manufacture_item(state: GameState, worker_index: int, item_name: str) -> boo
 
 'Building and factory actions'
 
+def build_from_catalog(building_key: str) -> Any:
+    key = building_key.strip().lower()
+    catalog = {
+        'power': lambda: PowerPlant('Solar Power Plant', safety_rating=95, number_of_workers=1),
+        'water': lambda: WaterExtractor('Water Extractor', safety_rating=92, number_of_workers=1),
+        'iceminer': lambda: IceMinor('Ice Mining Facility', safety_rating=90, number_of_workers=2),
+        'oxygen': lambda: OxygenGenerator('Oxygen Generator', safety_rating=95, number_of_workers=1),
+        'co2': lambda: CarbonDioxideGenerator('CO2 Scrubber', safety_rating=94, number_of_workers=1),
+        'nitrogen': lambda: NitrogenGenerator('Nitrogen Generator', safety_rating=94, number_of_workers=1),
+        'hydrogen': lambda: HydrogenGenerator('Hydrogen Generator', safety_rating=92, number_of_workers=1),
+        'food': lambda: FoodFactory('Food Factory', safety_rating=96, number_of_workers=2),
+        'fuel': lambda: FuelRefinery('Fuel Refinery', safety_rating=91, number_of_workers=2),
+        'aluminum': lambda: AluminumMine('Aluminum Mine', safety_rating=90, number_of_workers=2),
+        'steel': lambda: SteelMill('Steel Mill', safety_rating=89, number_of_workers=2),
+        'soil': lambda: SoilProcessor('Soil Processor', safety_rating=93, number_of_workers=1),
+        'plastic': lambda: PlasticFactory('Plastic Factory', safety_rating=92, number_of_workers=2),
+        'glass': lambda: GlassFactory('Glass Factory', safety_rating=93, number_of_workers=1),
+        'farm_lettuce': lambda: Farm('Lettuce Farm', crop='lettuce', product_type='crop', safety_rating=96, number_of_workers=1),
+        'farm_wheat': lambda: Farm('Wheat Farm', crop='wheat', product_type='crop', safety_rating=96, number_of_workers=1),
+        'farm_flax': lambda: Farm('Flax Farm', crop='flax', product_type='crop', safety_rating=96, number_of_workers=1),
+        'farm_sunflower': lambda: Farm('Sunflower Farm', crop='sunflower', product_type='crop', safety_rating=96, number_of_workers=1),
+        'car_factory': lambda: CarFactory('Car Factory', safety_rating=90, number_of_workers=3),
+        'truck_factory': lambda: TruckFactory('Truck Factory', safety_rating=90, number_of_workers=3),
+        'rover_factory': lambda: RoverFactory('Rover Factory', safety_rating=92, number_of_workers=3),
+        'satellite_factory': lambda: SatelliteFactory('Satellite Factory', safety_rating=94, number_of_workers=3),
+        'rocket_factory': lambda: RocketFactory('Rocket Factory', safety_rating=90, number_of_workers=4),
+        'drone_factory': lambda: DroneFactory('Drone Factory', safety_rating=93, number_of_workers=2),
+        'habitation': lambda: Habitation('Habitation Dome', safety_rating=98, number_of_workers=1),
+        'recreation': lambda: RecreationCenter('Recreation Center', safety_rating=98, number_of_workers=1),
+        'canteen': lambda: Canteen('Colony Canteen', safety_rating=97, number_of_workers=1),
+        'logistics': lambda: LogisticsBuilding('Logistics Hub', safety_rating=96, number_of_workers=2, transfer_amount=25000),
+        'research': lambda: ResearchBuilding('Research Lab', safety_rating=96, number_of_workers=2),
+    }
+    factory_fn = catalog.get(key)
+    if factory_fn is None:
+        return None
+    return factory_fn()
+
+
 def construct_building(state: GameState, new_building: Any) -> bool:
-    power_cost = float(getattr(new_building, 'production_cost', 50))
+    if isinstance(new_building, str):
+        resolved = build_from_catalog(new_building)
+        if resolved is None:
+            state.log.append(f'Unknown building type: {new_building}.')
+            return False
+        new_building = resolved
+    power_cost = round(float(getattr(new_building, 'production_cost', 500)) * 0.05, 1)
     costs = {'electricity': power_cost, 'steel': 20.0, 'aluminum': 20.0}
     if not _spend_bundle(state, costs):
         state.log.append(f'Need {power_cost} electricity, 20 steel, and 20 aluminum to build {new_building.name}.')
@@ -452,12 +560,43 @@ def construct_building(state: GameState, new_building: Any) -> bool:
     return True
 
 
+def toggle_building(state: GameState, building_index: int) -> bool:
+    if not (0 <= building_index < len(state.buildings)):
+        state.log.append('Invalid building index.')
+        return False
+    bld = state.buildings[building_index]
+    if bld.is_on:
+        bld.turn_off()
+        state.log.append(f'{bld.name} turned Off.')
+    else:
+        bld.turn_on()
+        state.log.append(f'{bld.name} turned On.')
+    return True
+
+
+def set_building_workers(state: GameState, building_index: int, worker_count: int) -> bool:
+    if not (0 <= building_index < len(state.buildings)):
+        state.log.append('Invalid building index.')
+        return False
+    bld = state.buildings[building_index]
+    try:
+        bld.number_of_workers = worker_count
+        state.log.append(f'{bld.name} staffed with {worker_count} workers.')
+        return True
+    except (TypeError, ValueError) as err:
+        state.log.append(str(err))
+        return False
+
+
 def operate_factory(state: GameState, factory_index: int, worker_indices: List[int]) -> bool:
     if not (0 <= factory_index < len(state.buildings)):
         state.log.append('Invalid building index.')
         return False
     facility = state.buildings[factory_index]
-    needed_workers = int(getattr(facility, 'number_of_workers', 1))
+    if not isinstance(facility, ResourceBuilding):
+        state.log.append(f'{facility.name} is not a production building.')
+        return False
+    needed_workers = max(1, int(getattr(facility, 'number_of_workers', 1)))
     unique_indices = list(dict.fromkeys(worker_indices))
     if len(unique_indices) < needed_workers:
         state.log.append(f'{facility.name} requires {needed_workers} workers.')
@@ -468,21 +607,20 @@ def operate_factory(state: GameState, factory_index: int, worker_indices: List[i
         if worker is None:
             return False
         crew_assigned.append(worker)
-    power_cost = round(float(getattr(facility, 'production_cost', 40)) * 0.25, 1)
-    if not _spend_bundle(state, {'electricity': power_cost, 'dirt': 15.0}):
-        state.log.append(f'{facility.name} needs {power_cost} electricity and 15 dirt.')
+    if not spend_resource(state, 'electricity', 15.0):
+        state.log.append(f'{facility.name} needs 15 electricity to run shift.')
         return False
     avg_eff = sum(_worker_efficiency(w, 'Engineer') for w in crew_assigned) / len(crew_assigned)
-    safety = float(getattr(facility, 'safety_rating', 0.95))
+    safety = float(getattr(facility, 'safety_rating', 90))
+    safety_ratio = safety / 100.0 if safety > 1.0 else safety
     for worker in crew_assigned:
         worker.SendToWork()
-        damage = 8.0 if random.random() > safety else 2.0
+        damage = 8.0 if random.random() > safety_ratio else 2.0
         _damage_worker(worker, damage)
-    output = round(10.0 * avg_eff, 1)
-    add_resource(state, 'steel', output)
-    add_resource(state, 'aluminum', output)
-    add_resource(state, 'plastic', round(output * 0.5, 1))
-    state.log.append(f'{facility.name} produced +{output} steel, +{output} aluminum.')
+    cls_name = type(facility).__name__
+    _, base_out = BUILDING_DAILY_PROFILES.get(cls_name, ({}, 10.0))
+    produced = facility.produce(round(base_out * avg_eff, 1))
+    state.log.append(f'{facility.name} stored +{produced} {facility.resource_attribute} locally.')
     return True
 
 
@@ -498,12 +636,32 @@ def maintain_buildings(state: GameState) -> bool:
         return False
     for bld in state.buildings:
         if hasattr(bld, 'safety_rating'):
-            bld.safety_rating = min(1.0, round(bld.safety_rating + 0.02, 2))
+            if bld.safety_rating <= 1.0:
+                bld.safety_rating = min(1.0, round(bld.safety_rating + 0.04, 2))
+            else:
+                bld.safety_rating = min(100, bld.safety_rating + 4)
     state.log.append(f'Maintained {len(state.buildings)} buildings.')
     return True
 
 
-'Vehicle and mission actions'
+def run_research_lab(state: GameState, building_index: int, points: int = 1) -> bool:
+    if not (0 <= building_index < len(state.buildings)):
+        state.log.append('Invalid building index.')
+        return False
+    lab = state.buildings[building_index]
+    if not isinstance(lab, ResearchBuilding):
+        state.log.append(f'{lab.name} is not a ResearchBuilding.')
+        return False
+    gained = lab.produce_research(max(1, int(points)))
+    if gained <= 0:
+        state.log.append(f'{lab.name} lacked inputs or power to produce research.')
+        return False
+    state.science_points += gained * 15.0
+    state.log.append(f'{lab.name} generated +{gained} research points (+{gained * 15.0:.1f} science).')
+    return True
+
+
+'Vehicle, mission, and crisis actions'
 
 def deploy_rover(state: GameState, worker_index: int) -> bool:
     if not has_resource(state, 'rovers', 1):
@@ -582,6 +740,20 @@ def launch_rocket(state: GameState, worker_index: int) -> bool:
     return True
 
 
+def resolve_crises(state: GameState) -> bool:
+    if not state.hazard_manager.active_incidents:
+        state.log.append('No active crises to resolve.')
+        return False
+    resolved_any = False
+    for inc in list(state.hazard_manager.active_incidents):
+        if inc.check_resolution(state):
+            state.hazard_manager.active_incidents.remove(inc)
+            resolved_any = True
+    if not resolved_any:
+        state.log.append('Missing required resources or ready specialists to resolve crisis.')
+    return resolved_any
+
+
 'Turn progression'
 
 def advance_sol(state: GameState) -> None:
@@ -593,17 +765,29 @@ def advance_sol(state: GameState) -> None:
 
     active = [w for w in state.workers if not getattr(w, 'retired', False) and w.getHealth() > 0]
     people_count = len(active)
-    total_space = max(1, sum(int(getattr(b, 'space_size', 1)) for b in state.buildings))
+    total_volume = sum(float(getattr(b, 'volume', 100)) for b in state.buildings if getattr(b, 'is_on', True))
+    space_units = max(1.0, total_volume / 100.0)
 
     ordered_buildings = sorted(
         state.buildings,
-        key=lambda b: 0 if getattr(b, 'type_of_building', '') == 'Power' else 1,
+        key=lambda b: 0 if isinstance(b, PowerPlant) else 1,
     )
 
+    resource_buildings: List[ResourceBuilding] = []
+    logistics_buildings: List[LogisticsBuilding] = []
+
     for bld in ordered_buildings:
-        inputs = dict(getattr(bld, 'daily_inputs', {}))
-        outputs = dict(getattr(bld, 'daily_outputs', {}))
-        safety = float(getattr(bld, 'safety_rating', 1.0))
+        if not getattr(bld, 'is_on', True):
+            continue
+        if isinstance(bld, LogisticsBuilding):
+            logistics_buildings.append(bld)
+            continue
+        if not isinstance(bld, ResourceBuilding):
+            continue
+
+        resource_buildings.append(bld)
+        cls_name = type(bld).__name__
+        inputs, base_output = BUILDING_DAILY_PROFILES.get(cls_name, ({'electricity': 10.0}, 5.0))
 
         if inputs and not _spend_bundle(state, inputs):
             state.log.append(f'{bld.name} offline today (missing inputs).')
@@ -613,21 +797,49 @@ def advance_sol(state: GameState) -> None:
             if res_name in spent:
                 spent[res_name] += amt
 
-        for res_name, amt in outputs.items():
-            scale = env['solar_multiplier'] if res_name == 'electricity' else 1.0
-            produced = round(amt * safety * scale, 1)
-            add_resource(state, res_name, produced)
-            if res_name in gained:
-                gained[res_name] += produced
+        safety = float(getattr(bld, 'safety_rating', 95))
+        safety_factor = (safety / 100.0) if safety > 1.0 else safety
+        max_cap = max(1, int(getattr(type(bld), 'max_worker_capacity', 1)))
+        workers_assigned = int(getattr(bld, 'number_of_workers', 0))
+        staff_factor = 0.5 + 0.5 * (workers_assigned / max_cap)
+        env_factor = env['solar_multiplier'] if isinstance(bld, PowerPlant) else 1.0
+
+        produced_qty = round(base_output * max(0.3, safety_factor) * staff_factor * env_factor, 1)
+        bld.produce(produced_qty)
+
+    if logistics_buildings and resource_buildings:
+        for hub in logistics_buildings:
+            if not getattr(hub, 'is_on', True):
+                continue
+            if not spend_resource(state, 'electricity', 8.0):
+                state.log.append(f'{hub.name} lacked 8 electricity for logistics transfer.')
+                continue
+            spent['electricity'] += 8.0
+            transferred = hub.process_turn(resource_buildings)
+            for res_name, amt in transferred.items():
+                if res_name in gained:
+                    gained[res_name] += amt
+    else:
+        for bld in resource_buildings:
+            for res_name, local_store in list(bld.storage.items()):
+                avail = local_store.getResources()
+                if avail > 0:
+                    prev = get_resource(state, res_name)
+                    add_resource(state, res_name, avail)
+                    accepted = get_resource(state, res_name) - prev
+                    if accepted > 0:
+                        local_store.SubtractResources(accepted)
+                        if res_name in gained:
+                            gained[res_name] += accepted
 
     if state.active_satellites > 0:
         sat_power = round(state.active_satellites * 20.0 * env['solar_multiplier'], 1)
         add_resource(state, 'electricity', sat_power)
         gained['electricity'] += sat_power
 
-    space_power_cost = round(total_space * env['power_per_space'], 1)
-    space_o2_cost = round(total_space * env['o2_leak_per_space'], 2)
-    space_n2_cost = round(total_space * env['n2_leak_per_space'], 2)
+    space_power_cost = round(space_units * env['power_per_100m3'], 1)
+    space_o2_cost = round(space_units * env['o2_leak_per_100m3'], 2)
+    space_n2_cost = round(space_units * env['n2_leak_per_100m3'], 2)
 
     if spend_resource(state, 'electricity', space_power_cost):
         spent['electricity'] += space_power_cost
@@ -637,7 +849,7 @@ def advance_sol(state: GameState) -> None:
         spent['electricity'] += actual
         for worker in active:
             _damage_worker(worker, 6.0)
-        state.log.append(f'Life-support power deficit across {total_space} space units!')
+        state.log.append(f'Life-support power deficit across {total_volume:.0f} m^3 base volume!')
 
     o2_used = min(space_o2_cost, get_resource(state, 'oxigen'))
     spend_resource(state, 'oxigen', o2_used)
@@ -647,14 +859,29 @@ def advance_sol(state: GameState) -> None:
     spend_resource(state, 'Nitrogen', n2_used)
     spent['Nitrogen'] += n2_used
 
+    has_canteen = any(isinstance(b, Canteen) and getattr(b, 'is_on', True) for b in state.buildings)
+    has_recreation = any(isinstance(b, RecreationCenter) and getattr(b, 'is_on', True) for b in state.buildings)
+    total_bed_cap = sum(
+        int(getattr(b, 'resident_capacity', 0))
+        for b in state.buildings
+        if isinstance(b, Habitation) and getattr(b, 'is_on', True)
+    )
+
+    if total_bed_cap > 0 and people_count > total_bed_cap:
+        for worker in active:
+            _damage_worker(worker, 4.0)
+        state.log.append(f'Overcrowding! {people_count} crew exceed {total_bed_cap} habitation beds (-4 HP).')
+
+    daily_kcal_need = 1800.0 if has_canteen else 2000.0
+
     for worker in active:
         worker.age += 1
 
-        if spend_resource(state, 'food', 2000.0):
-            spent['food'] += 2000.0
+        if spend_resource(state, 'food', daily_kcal_need):
+            spent['food'] += daily_kcal_need
         else:
             _damage_worker(worker, 15.0)
-            state.log.append(f'Food shortage (-2000 kcal needed)! {worker.Name} took 15 damage.')
+            state.log.append(f'Food shortage (-{daily_kcal_need:.0f} kcal needed)! {worker.Name} took 15 damage.')
 
         if spend_resource(state, 'water', 2.5):
             spent['water'] += 2.5
@@ -674,31 +901,21 @@ def advance_sol(state: GameState) -> None:
         add_resource(state, 'CO2', 1.0)
         gained['CO2'] += 1.0
 
+        if has_recreation:
+            for i in range(len(worker.getDebuffs())):
+                worker.modDebuff(-1.5, i)
+
         if not worker.isAvailable():
             worker.SendToRest()
 
     for bld in state.buildings:
-        if hasattr(bld, 'safety_rating'):
-            bld.safety_rating = max(0.5, round(bld.safety_rating - 0.01, 2))
+        if hasattr(bld, 'safety_rating') and getattr(bld, 'is_on', True):
+            if bld.safety_rating <= 1.0:
+                bld.safety_rating = max(0.5, round(bld.safety_rating - 0.01, 2))
+            else:
+                bld.safety_rating = max(50, bld.safety_rating - 1)
 
-    if random.random() < env['hazard_chance'] and active:
-        event = random.choice(['dust_storm', 'micrometeorite', 'solar_flare'])
-        target = random.choice(active)
-        if event == 'dust_storm':
-            loss = min(25.0, get_resource(state, 'electricity'))
-            spend_resource(state, 'electricity', loss)
-            spent['electricity'] += loss
-            env_label = env['label']
-            state.log.append(f'Space Event ({env_label}): Dust storm drained {loss:.1f} electricity.')
-        elif event == 'micrometeorite':
-            loss = min(6.0, get_resource(state, 'oxigen'))
-            spend_resource(state, 'oxigen', loss)
-            spent['oxigen'] += loss
-            _damage_worker(target, 10.0)
-            state.log.append(f'Space Event: Hull micrometeorite (-{loss:.1f} oxigen). {target.Name} took 10 damage.')
-        elif event == 'solar_flare':
-            target.modDebuff(8.0, 0)
-            state.log.append(f'Space Event: Solar flare radiation hit {target.Name}.')
+    state.hazard_manager.process_turn(state)
 
     state.daily_report = {
         k: {
@@ -716,7 +933,7 @@ def advance_sol(state: GameState) -> None:
     net_water = state.daily_report.get('water', {}).get('net', 0)
     net_power = state.daily_report.get('electricity', {}).get('net', 0)
     state.log.append(
-        f'Sol {state.sol} ({env_label} | Crew: {people_count} | Space: {total_space}): '
+        f'Sol {state.sol} ({env_label} | Crew: {people_count} | Vol: {total_volume:.0f} m^3): '
         f'Food {net_food:+.0f} kcal, O2 {net_o2:+.1f}, Water {net_water:+.1f}, Power {net_power:+.1f}'
     )
 
@@ -743,12 +960,16 @@ class ActionRouter:
             'produce_fuel': produce_fuel,
             'manufacture': manufacture_item,
             'construct_building': construct_building,
+            'toggle_building': toggle_building,
+            'staff_building': set_building_workers,
             'operate_factory': operate_factory,
             'maintain_buildings': maintain_buildings,
+            'run_research': run_research_lab,
             'deploy_rover': deploy_rover,
             'fly_drone': fly_drone,
             'launch_satellite': launch_satellite,
             'launch_rocket': launch_rocket,
+            'resolve_crises': resolve_crises,
             'advance_sol': advance_sol,
         }
 
