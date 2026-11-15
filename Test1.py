@@ -3,9 +3,7 @@ from enum import Enum
 from typing import Dict, List
 
 
-# ==============================================================================
-# 1. RESOURCE CLASS (Ported from your C++ 'Resource Class')
-# ==============================================================================
+
 class Resource:
     def __init__(self, name: str, current: float = 0.0, max_val: float = 1000.0, unit: str = ""):
         self.name = name
