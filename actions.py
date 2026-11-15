@@ -46,54 +46,50 @@ def expand_resource_max(state: GameState, name: str, amount: float) -> bool:
     res.AddMax(amount)
     return True
 
-
 'Worker actions'
 
 def assign_worker_job(state: GameState, worker_index: int, profession_code: int):
-    pass
+    if 0 <= worker_index < len(state.workers):
+        worker = state.workers[worker_index]
+        worker.setType(profession_code)
+        state.log.append(f'{worker.Name} assigned to {worker.getType().name}.')
 
 
 def send_worker_to_work(state: GameState, worker_index: int):
-    pass
+    if 0 <= worker_index < len(state.workers):
+        worker = state.workers[worker_index]
+        if worker.SendToWork():
+            state.log.append(f'{worker.Name} sent to work.')
+        else:
+            state.log.append(f'{worker.Name} is unavailable to work.')
 
 
 def send_worker_to_rest(state: GameState, worker_index: int):
-    pass
+    if 0 <= worker_index < len(state.workers):
+        worker = state.workers[worker_index]
+        worker.SendToRest()
+        state.log.append(f'{worker.Name} sent to rest. HP: {worker.getHealth():.1f}')
 
 
 def send_worker_to_hospital(state: GameState, worker_index: int):
-    pass
+    if 0 <= worker_index < len(state.workers):
+        worker = state.workers[worker_index]
+        worker.SendToHospital()
+        state.log.append(f'{worker.Name} sent to hospital. HP: {worker.getHealth():.1f}')
 
 
 def send_worker_to_study(state: GameState, worker_index: int):
-    pass
+    if 0 <= worker_index < len(state.workers):
+        worker = state.workers[worker_index]
+        worker.SendToStudy()
+        state.log.append(f'{worker.Name} sent to study.')
 
 
 def retire_worker(state: GameState, worker_index: int):
-    pass
-
-
-'Life support and farming actions'
-
-def run_moxie(state: GameState, worker_index: int):
-    pass
-
-
-def balance_atmosphere(state: GameState):
-    pass
-
-
-def run_hydroponics(state: GameState, worker_index: int, crop_name: str):
-    pass
-
-
-def run_food_refinery(state: GameState, worker_index: int, crop_name: str):
-    pass
-
-
-def feed_crew(state: GameState):
-    pass
-
+    if 0 <= worker_index < len(state.workers):
+        worker = state.workers[worker_index]
+        worker.Retire()
+        state.log.append(f'{worker.Name} has retired.')
 
 'Mining and manufacturing actions'
 
