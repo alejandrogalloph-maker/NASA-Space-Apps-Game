@@ -1,3 +1,7 @@
+import math
+import random
+from typing import Dict, List, Optional
+
 import Resource_Class as resource_inventory
 from Resource_Class import (
     water, oxigen, CO2, Nitrogen, Hydrogen, food, electricity, fuel,
@@ -5,8 +9,10 @@ from Resource_Class import (
     cars, trucks, rovers, satellites, rockets, drones,
     seed_Lettuce, seed_Wheat, seed_Flax, seed_sunflower,
     lettuce, wheat, flax, sunflower,
+    radioisotope_fuel,
 )
-from Worker_Class import Worker
+from Worker_Class import Worker, Profession
+from Worker_Class import RobotWorker
 from Building_file import (
     all_buildings,
     ResourceBuilding,
@@ -17,6 +23,12 @@ from Building_file import (
     SteelMill,
     Habitation,
     LogisticsBuilding,
+    RobotFactory,
+    RadioisotopeThermoelectricGenerator,
+    ServiceBuilding,
+    Farm,
+    IceMinor,
+    AluminumMine,
 )
 from actions import (
     SPACE_ENVIRONMENTS,
@@ -24,7 +36,33 @@ from actions import (
     ActionRouter,
     expand_resource_max,
     add_resource,
+    build_from_catalog,
 )
+
+STARTING_STOCK: Dict[str, tuple[float, float]] = {
+    'water': (2000, 500), 'oxigen': (500, 120), 'CO2': (300, 60),
+    'Nitrogen': (500, 200), 'Hydrogen': (300, 80), 'food': (300000, 90000),
+    'electricity': (1000, 500), 'fuel': (1000, 300), 'aluminum': (2000, 200),
+    'steel': (2000, 200), 'dirt': (5000, 300), 'plastic': (1000, 100),
+    'glass': (1000, 100), 'cars': (5, 1), 'trucks': (5, 1), 'rovers': (10, 2),
+    'satellites': (5, 1), 'rockets': (5, 1), 'drones': (15, 3),
+    'seed_Lettuce': (500, 30), 'seed_Wheat': (500, 30),
+    'seed_Flax': (500, 30), 'seed_sunflower': (500, 30),
+    'lettuce': (500, 15), 'wheat': (500, 15), 'flax': (500, 10),
+    'sunflower': (500, 10), 'radioisotope_fuel': (1000, 300),
+}
+RESOURCE_LABELS: Dict[str, str] = {
+    'water': 'Water (L)', 'oxigen': 'Oxygen (kg)', 'CO2': 'Carbon dioxide (kg)',
+    'Nitrogen': 'Nitrogen (kg)', 'Hydrogen': 'Hydrogen (kg)', 'food': 'Food (kcal)',
+    'electricity': 'Electricity (kWh)', 'fuel': 'Fuel (L)', 'aluminum': 'Aluminum (kg)',
+    'steel': 'Steel (kg)', 'dirt': 'Regolith (kg)', 'plastic': 'Plastic (kg)',
+    'glass': 'Glass (kg)', 'cars': 'Cars', 'trucks': 'Trucks', 'rovers': 'Rovers',
+    'satellites': 'Satellites', 'rockets': 'Rockets', 'drones': 'Drones',
+    'seed_Lettuce': 'Lettuce seeds', 'seed_Wheat': 'Wheat seeds',
+    'seed_Flax': 'Flax seeds', 'seed_sunflower': 'Sunflower seeds',
+    'lettuce': 'Lettuce (kg)', 'wheat': 'Wheat (kg)', 'flax': 'Flax (kg)',
+    'sunflower': 'Sunflower (kg)', 'radioisotope_fuel': 'Radioisotope fuel (uranium/plutonium)',
+}
 
 
 def choose_mission_setup() -> tuple[str, int, int, float]:
@@ -39,7 +77,7 @@ def choose_mission_setup() -> tuple[str, int, int, float]:
         pwr_v = info['power_per_100m3']
         o2_v = info['o2_leak_per_100m3']
         haz = int(info['hazard_chance'] * 100)
-        print(f'  [{idx}] {lbl} ({key}) | Solar x{sol_m} | Power/100m3: -{pwr_v} | O2 Leak/100m3: -{o2_v} | Hazard: {haz}%')
+        print(f'  [{idx}] {lbl} ({key}) | Solar x{sol_m} | Power/100m3: -{pwr_v} | O2 Leak/100m3: -{o2_v} | Hazard: {haz}% per hazard/Sol')
 
     space_choice = input('Enter choice [1-4] (default 3 = Mars): ').strip()
     key_map = {'1': 'orbit', '2': 'moon', '3': 'mars', '4': 'deep_space'}
@@ -73,8 +111,18 @@ def choose_mission_setup() -> tuple[str, int, int, float]:
     return selected_space, crew_count, target_sols, target_sci
 
 
-def setup_game(space_key: str = 'mars', crew_count: int = 6) -> ActionRouter:
+def setup_game(
+    space_key: str = 'mars',
+    crew_count: int = 6,
+    *,
+    workers: Optional[List[Worker]] = None,
+    starting_resources: Optional[Dict[str, float]] = None,
+    starting_buildings: Optional[Dict[str, int]] = None,
+    difficulty: str = "easy",
+) -> ActionRouter:
     all_buildings.clear()
+    resource_inventory.research.max = 10000
+    resource_inventory.research.current = 0
     pool = {
         'water': water, 'oxigen': oxigen, 'CO2': CO2, 'Nitrogen': Nitrogen,
         'Hydrogen': Hydrogen, 'food': food, 'electricity': electricity, 'fuel': fuel,
@@ -84,55 +132,74 @@ def setup_game(space_key: str = 'mars', crew_count: int = 6) -> ActionRouter:
         'seed_Lettuce': seed_Lettuce, 'seed_Wheat': seed_Wheat,
         'seed_Flax': seed_Flax, 'seed_sunflower': seed_sunflower,
         'lettuce': lettuce, 'wheat': wheat, 'flax': flax, 'sunflower': sunflower,
+        'radioisotope_fuel': radioisotope_fuel,
     }
 
-    starting_stock = {
-        'water': (2000, 500), 'oxigen': (500, 120), 'CO2': (300, 60),
-        'Nitrogen': (500, 200), 'Hydrogen': (300, 80), 'food': (300000, 90000),
-        'electricity': (1000, 500), 'fuel': (1000, 300), 'aluminum': (2000, 200),
-        'steel': (2000, 200), 'dirt': (5000, 300), 'plastic': (1000, 100),
-        'glass': (1000, 100), 'cars': (5, 1), 'trucks': (5, 1), 'rovers': (10, 2),
-        'satellites': (5, 1), 'rockets': (5, 1), 'drones': (15, 3),
-        'seed_Lettuce': (500, 30), 'seed_Wheat': (500, 30),
-        'seed_Flax': (500, 30), 'seed_sunflower': (500, 30),
-        'lettuce': (500, 15), 'wheat': (500, 15), 'flax': (500, 10), 'sunflower': (500, 10),
-    }
+    starting_values = starting_resources or {}
+    unknown_resources = set(starting_values) - set(STARTING_STOCK)
+    if unknown_resources:
+        raise ValueError(f'Unknown starting resources: {", ".join(sorted(unknown_resources))}')
+    for key, (max_cap, default_amount) in STARTING_STOCK.items():
+        amount = float(starting_values.get(key, default_amount))
+        if not math.isfinite(amount) or not 0 <= amount <= max_cap:
+            raise ValueError(f'Starting {key} must be between 0 and {max_cap:g}.')
+        pool[key].max = max_cap
+        pool[key].current = amount
 
-    workers = [Worker(10000 + i * 350) for i in range(crew_count)]
+    if workers is None:
+        workers = [Worker(10000 + i * 350) for i in range(max(0, min(50, crew_count)))]
+    starting_buildings = starting_buildings or {}
+    if not isinstance(starting_buildings, dict):
+        raise ValueError('Starting buildings must be an object of building counts.')
+    extra_buildings = []
+    for key, count in starting_buildings.items():
+        if not isinstance(key, str) or not isinstance(count, int) or isinstance(count, bool) or not 0 <= count <= 5:
+            raise ValueError('Starting building counts must be whole numbers from 0 to 5.')
+        for _ in range(count):
+            building = build_from_catalog(key)
+            if building is None:
+                raise ValueError(f'Unknown starting building type: {key}.')
+            extra_buildings.append(building)
+    if len(extra_buildings) > 15:
+        raise ValueError('Choose no more than 15 additional starting buildings.')
+
     buildings = [
         Habitation('Main Habitation Dome', safety_rating=98),
         PowerPlant('Main Solar Power Plant', safety_rating=96),
+        RadioisotopeThermoelectricGenerator(
+            'Backup Radioisotope Generator', safety_rating=99
+        ),
         OxygenGenerator('MOXIE Oxygen Generator', safety_rating=95),
         FoodFactory('Hydroponic Food Factory', safety_rating=96),
         WaterExtractor('Subsurface Water Extractor', safety_rating=92),
-        LogisticsBuilding('Central Logistics Hub', safety_rating=96, transfer_amount=25000),
+        LogisticsBuilding('Central Logistics Hub', safety_rating=96, transfer_amount=1000),
         SteelMill('Colony Steel Mill', safety_rating=90),
-    ]
-    state = GameState(pool, workers, buildings, space_key=space_key)
-    state.hazard_manager.compute_risk_probability(state)
-
-    for key, (max_cap, current_amt) in starting_stock.items():
-        if pool[key].getMaxResources() == 0:
-            expand_resource_max(state, key, max_cap)
-        if pool[key].getResources() == 0:
-            add_resource(state, key, current_amt)
-
+        RobotFactory('Robot Factory', safety_rating=95),
+        ServiceBuilding('Maintenance Service Building', safety_rating=96),
+        IceMinor('Subsurface Ice Mining Post', safety_rating=90),
+        AluminumMine('Regolith Aluminum Mining Post', safety_rating=90),
+        Farm('Hydroponics Bay', crop='lettuce', safety_rating=96),
+        Farm('Hydroponics Bay', crop='wheat', safety_rating=96),
+    ] + extra_buildings
+    state = GameState(
+        pool, workers, buildings, space_key=space_key, difficulty=difficulty
+    )
     router = ActionRouter(state)
     default_roles = [1, 2, 3, 4, 5, 2]
-    for idx in range(crew_count):
-        router.execute('assign_job', idx, default_roles[idx % len(default_roles)])
+    for idx, worker in enumerate(workers):
+        if worker.getType() == Profession.Unassigned:
+            worker.setType(default_roles[idx % len(default_roles)])
 
     initial_assignments = [
-        (0, 0),
-        (1, 1),
-        (3, 2),
-        (4, 3),
-        (5, 4),
-        (2, 5),
+        (9, 1),
+        (4, 2),
+        (5, 3),
+        (6, 4),
     ]
     for b_idx, w_idx in initial_assignments:
         if b_idx < len(buildings) and w_idx < len(workers):
-            router.execute('staff_building', b_idx, w_idx)
+            if workers[w_idx].getType().name in type(buildings[b_idx]).required_professions:
+                router.execute('staff_building', b_idx, w_idx)
 
     return router
 
@@ -167,7 +234,7 @@ def show_status(state: GameState, target_sols: int, target_sci: float) -> None:
     active_crew = [w for w in state.workers if not getattr(w, 'retired', False) and w.getHealth() > 0]
     total_volume = sum(float(getattr(b, 'volume', 100)) for b in state.buildings if getattr(b, 'is_on', True))
     space_label = state.space['label']
-    risk_pct = int(state.hazard_manager.last_risk_score * 100)
+    risk_pct = int(round(state.hazard_manager.last_risk_score * 100))
     res_pts = int(resource_inventory.research.getResources()) if hasattr(resource_inventory, 'research') else 0
     elapsed_hrs = getattr(state.time_engine, 'elapsed_hours', (state.sol - 1) * 24)
 
@@ -265,7 +332,7 @@ def main() -> None:
 
         print()
         print('Routes:', ', '.join(router.available_actions()))
-        print('Build types: power, water, iceminer, oxygen, co2, nitrogen, hydrogen, food, fuel, aluminum, steel, soil, plastic, glass, farm_lettuce, farm_wheat, habitation, recreation, canteen, logistics, research, university, medical_bay, hospital, graveyard, comms_hub, satellite_dish')
+        print('Use process_harvest <worker_index> to process plants, or construct_building <worker_index> <building_type> to build.')
         print()
         raw = input('Enter command (e.g. advance_sol | staff_building 2 5 | mine 5 | quit): ').strip()
         if not raw:
@@ -280,16 +347,18 @@ def main() -> None:
         try:
             if cmd in {'advance_sol', 'balance_atmosphere', 'feed_crew', 'maintain_buildings', 'resolve_crises', 'transfer_logistics'}:
                 router.execute(cmd)
-            elif cmd in {'advance_sols', 'work', 'rest', 'hospital', 'study', 'retire', 'run_moxie', 'mine', 'produce_fuel', 'deploy_rover', 'fly_drone', 'launch_satellite', 'launch_rocket', 'toggle_building'}:
+            elif cmd in {'advance_sols', 'work', 'rest', 'hospital', 'study', 'retire', 'run_moxie', 'mine', 'produce_fuel', 'deploy_rover', 'fly_drone', 'launch_satellite', 'launch_rocket', 'fabricate_robot', 'toggle_building'}:
                 router.execute(cmd, int(parts[1]))
             elif cmd in {'assign_job', 'staff_building', 'unstaff_building', 'run_research'}:
                 router.execute(cmd, int(parts[1]), int(parts[2]))
-            elif cmd in {'hydroponics', 'food_refinery', 'refine_materials', 'manufacture'}:
+            elif cmd in {'hydroponics', 'refine_materials', 'manufacture'}:
                 router.execute(cmd, int(parts[1]), parts[2])
+            elif cmd == 'process_harvest':
+                router.execute(cmd, int(parts[1]))
             elif cmd == 'university_train':
                 router.execute(cmd, int(parts[1]), int(parts[2]), parts[3])
             elif cmd == 'construct_building':
-                router.execute(cmd, parts[1])
+                router.execute(cmd, int(parts[1]), parts[2])
             elif cmd == 'operate_factory':
                 router.execute(cmd, int(parts[1]), [int(x) for x in parts[2:]])
             else:
