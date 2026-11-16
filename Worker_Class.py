@@ -9,6 +9,7 @@ class Profession(Enum):
     Biologist = 3
     Geologist = 4
     Pilot = 5
+    Robot = 6
     Unassigned = 0
 
 
@@ -29,6 +30,7 @@ class Worker:
         self.is_robot: bool = False
         self.powered_on: bool = True
         self.Available: bool = True
+        self.available_after_sol: int = 0
         self.retired: bool = False
         self.assigned_building = None
         self.wage: int = 10
@@ -86,6 +88,7 @@ class Worker:
     def SendToRest(self) -> bool:
         if self.retired or self.health <= 0 or self.assigned_building is not None:
             return False
+        self.available_after_sol = 0
         if not self.Available:
             self.Available = True
             Worker.AvailableCount += 1
@@ -153,8 +156,10 @@ class Worker:
             self.job = Profession.Geologist
         elif N == 5:
             self.job = Profession.Pilot
+        elif N == 6 and self.is_robot:
+            self.job = Profession.Robot
         else:
-            self.job = Profession.Unassigned
+            self.job = Profession.Robot if self.is_robot else Profession.Unassigned
 
     def resetRandomSeed(self) -> None:
         random.seed(time.time())
@@ -190,3 +195,4 @@ class RobotWorker(Worker):
         self.Name = name
         self.is_robot = True
         self.wage = 0
+        self.job = Profession.Robot
