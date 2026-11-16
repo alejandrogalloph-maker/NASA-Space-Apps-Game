@@ -24,20 +24,25 @@ from Building_file import (
     LogisticsBuilding,
     ResearchBuilding,
     ResourceBuilding,
+    ServiceBuilding,
     University,
     all_buildings,
 )
 from Worker_Class import Profession, Worker
 from Worker_Class import RobotWorker
-from actions import SPACE_ENVIRONMENTS, build_from_catalog
+from actions import DIFFICULTY_PROFILES, SPACE_ENVIRONMENTS, build_from_catalog
 from actions import (
     DAILY_ACTION_LIMITS,
     ROCKET_CREW_WEIGHTS_KG,
     ROCKET_MAX_PAYLOAD_KG,
     ROCKET_VEHICLE_WEIGHTS_KG,
     daily_action_limit,
+    daily_action_usage_key,
+    rocket_transit_sols,
 )
 
+# Use the CLI's canonical construction catalog when available; the fallback
+# keeps the browser UI usable if that optional import is unavailable.
 try:
     from cli import BUILD_TYPES
 except ImportError:
@@ -47,16 +52,53 @@ except ImportError:
         "aluminum", "steel", "soil", "plastic", "glass",
         "farm_lettuce", "farm_wheat", "farm_flax", "farm_sunflower",
         "car_factory", "truck_factory", "rover_factory", "satellite_factory", "rocket_factory", "drone_factory",
+        "robot_factory",
+        "service",
         "habitation", "recreation", "canteen", "logistics", "research", "university",
-        "medical_bay", "hospital", "graveyard", "comms_hub", "satellite_dish",
-    ]
+            "medical_bay", "hospital", "graveyard", "comms_hub", "satellite_dish",
+        ]
 
 
-NUM_SET_ACTIONS = 5
+NUM_SET_ACTIONS = 13
 NUM_RANDOM_ACTIONS = 5
 DAILY_ACTION_LIMITS["reroll_random_actions"] = 1
 
+# Mission objectives offered by Earth, including the progress metric and reward.
+SIDE_QUESTS: List[Dict[str, Any]] = [
+    {
+        "id": "prospecting",
+        "name": "Prospecting Telemetry",
+        "message": "Earth requests a fresh 75-unit prospecting report.",
+        "objective_kind": "mined_units",
+        "objective_target": 75.0,
+        "objective_text": "Mine 75 units after accepting this task.",
+        "reward_research": 60.0,
+        "unlock_building": "fuel",
+    },
+    {
+        "id": "science_exchange",
+        "name": "Science Data Exchange",
+        "message": "Earth requests 100 new science points for a research package.",
+        "objective_kind": "science",
+        "objective_target": 100.0,
+        "objective_text": "Earn 100 science after accepting this task.",
+        "reward_research": 100.0,
+        "unlock_building": "research",
+    },
+    {
+        "id": "power_array",
+        "name": "Power Array Expansion",
+        "message": "Earth requests one additional Power Plant for the orbital relay.",
+        "objective_kind": "power_plants",
+        "objective_target": 1.0,
+        "objective_text": "Construct one additional Power Plant after accepting this task.",
+        "reward_research": 80.0,
+        "unlock_building": "satellite_dish",
+    },
+]
 
+
+# Construction clearance requirements, indexed by catalog key.
 PHASE_CATALOG: Dict[str, int] = {
     "power": 1, "rtg": 1, "water": 1, "oxygen": 1, "food": 1,
     "habitation": 1, "canteen": 1, "recreation": 1, "logistics": 1,
@@ -68,9 +110,11 @@ PHASE_CATALOG: Dict[str, int] = {
     "research": 3, "university": 3, "comms_hub": 3, "satellite_dish": 3,
     "drone_factory": 4, "rover_factory": 4, "satellite_factory": 4,
     "rocket_factory": 4, "car_factory": 4, "truck_factory": 4,
+    "robot_factory": 1, "service": 1,
 }
 
 
+# Crew-facing descriptions and bonuses shown in the roster and briefing.
 ROLE_PROFILES: Dict[str, Dict[str, str]] = {
     "Doctor": {
         "title": "Chief Medical & Habitat Officer",
@@ -80,15 +124,15 @@ ROLE_PROFILES: Dict[str, Dict[str, str]] = {
     },
     "Engineer": {
         "title": "Systems & Power Engineer",
-        "summary": "Operates Solar Power Plants, MOXIE Oxygen Generators, Steel Mills, and Fuel Refineries. Repairs Grid Overloads and Hull Breaches.",
-        "buildings": "Power Plant, MOXIE, Steel Mill, Fuel Refinery, Research Lab",
-        "bonus": "1.5x yield on MOXIE O2, Sabatier Fuel & Alloy Refining",
+        "summary": "Maintains colony systems, Steel Mills, and Fuel Refineries. Repairs Grid Overloads and Hull Breaches.",
+        "buildings": "Maintenance Service Building, Steel Mill, Fuel Refinery, Research Lab",
+        "bonus": "1.5x yield on Sabatier Fuel & Alloy Refining",
     },
     "Biologist": {
         "title": "Astrobiologist & Life-Support Specialist",
         "summary": "Runs Hydroponic Food Factories, Crop Farms, Canteens, and Research Labs to sustain daily crew calorie rations.",
         "buildings": "Food Factory, Crop Farms, Canteen, Research Lab",
-        "bonus": "1.5x yield on Hydroponics & Food Refinery",
+        "bonus": "1.5x yield on Hydroponics & plant processing",
     },
     "Geologist": {
         "title": "Planetary Geologist & Extraction Lead",
@@ -98,7 +142,7 @@ ROLE_PROFILES: Dict[str, Dict[str, str]] = {
     },
     "Pilot": {
         "title": "Flight & Logistics Officer",
-        "summary": "Commands the Central Logistics Hub to move local building production into global colony storage, and pilots drones, satellites, and rockets.",
+        "summary": "Commands the Central Logistics Hub to move up to 1,000 units per Sol into colony storage, and pilots drones, satellites, and rockets.",
         "buildings": "Logistics Hub, Communications Hub, Satellite Dish",
         "bonus": "1.5x Science on Drone Recon, Satellites & Rocket Missions",
     },
@@ -108,9 +152,16 @@ ROLE_PROFILES: Dict[str, Dict[str, str]] = {
         "buildings": "General Support",
         "bonus": "Standard shift efficiency",
     },
+    "Robot": {
+        "title": "Universal Robotic Worker",
+        "summary": "Can staff any building or perform any worker action.",
+        "buildings": "All facilities and field operations",
+        "bonus": "Universal role; no morale penalty",
+    },
 }
 
 
+# Templates for actions guaranteed to appear in the daily action list.
 SET_ACTION_TEMPLATES: List[Dict[str, Any]] = [
     {
         "id": "set_atmosphere",
@@ -129,8 +180,8 @@ SET_ACTION_TEMPLATES: List[Dict[str, Any]] = [
         "arg_mode": "none",
         "param": None,
         "preferred_role": "",
-        "cost": "Upkeep Power + 1 Al / Building",
-        "effect": "+4% Safety Rating on all buildings",
+        "cost": "Power + 1 Aluminum per assigned building",
+        "effect": "Repairs 20 health, improves safety, and boosts staffed production next Sol",
     },
     {
         "id": "set_logistics",
@@ -140,7 +191,7 @@ SET_ACTION_TEMPLATES: List[Dict[str, Any]] = [
         "param": None,
         "preferred_role": "Pilot",
         "cost": "Requires Operational Logistics Hub",
-        "effect": "Moves local building buffers to global stock",
+        "effect": "Transfers up to 1,000 units per Logistics Hub per Sol",
     },
     {
         "id": "set_rations",
@@ -162,65 +213,23 @@ SET_ACTION_TEMPLATES: List[Dict[str, Any]] = [
         "cost": "Incident Materials + Ready Specialists",
         "effect": "Resolves active colony hazards",
     },
-]
-
-
-RANDOM_ACTION_POOL: List[Dict[str, Any]] = [
     {
-        "key": "rnd_moxie",
-        "min_phase": 1,
-        "title": "MOXIE High-Output O2 Cycle",
-        "action": "run_moxie",
+        "id": "set_process_plants",
+        "title": "Process Plants",
+        "action": "process_harvest",
         "arg_mode": "worker",
         "param": None,
-        "preferred_role": "Engineer",
-        "cost": "25 Electricity, 4 CO2 + 1 Ready Worker",
-        "effect": "+6.0x Oxygen (1.5x with Engineer)",
-    },
-    {
-        "key": "rnd_hydro_lettuce",
-        "min_phase": 1,
-        "title": "Hydroponic Flush: Lettuce",
-        "action": "hydroponics",
-        "arg_mode": "worker_param",
-        "param": "lettuce",
         "preferred_role": "Biologist",
-        "cost": "2 Lettuce Seeds, 12 Water, 15 Power",
-        "effect": "+4.0x Lettuce, +1.5x O2, +1 Seed",
+        "cost": "5 units per crop batch, 10 Electricity per batch + 1 Ready Worker",
+        "effect": "Processes all affordable harvested crops into food, plastic, and fuel",
     },
-    {
-        "key": "rnd_hydro_wheat",
-        "min_phase": 1,
-        "title": "Hydroponic Flush: Wheat",
-        "action": "hydroponics",
-        "arg_mode": "worker_param",
-        "param": "wheat",
-        "preferred_role": "Biologist",
-        "cost": "2 Wheat Seeds, 12 Water, 15 Power",
-        "effect": "+4.0x Wheat, +1.5x O2, +1 Seed",
-    },
-    {
-        "key": "rnd_refine_wheat",
-        "min_phase": 1,
-        "title": "Caloric Ration Processing (Wheat)",
-        "action": "food_refinery",
-        "arg_mode": "worker_param",
-        "param": "wheat",
-        "preferred_role": "Biologist",
-        "cost": "5 Wheat, 10 Electricity + 1 Ready Worker",
-        "effect": "+16,000x Food kcal (1.5x with Biologist)",
-    },
-    {
-        "key": "rnd_refine_lettuce",
-        "min_phase": 1,
-        "title": "Fresh Greens Processing (Lettuce)",
-        "action": "food_refinery",
-        "arg_mode": "worker_param",
-        "param": "lettuce",
-        "preferred_role": "Biologist",
-        "cost": "5 Lettuce, 10 Electricity + 1 Ready Worker",
-        "effect": "+9,000x Food kcal (1.5x with Biologist)",
-    },
+]
+
+NUM_SET_ACTIONS = len(SET_ACTION_TEMPLATES)
+
+# Candidate cards for the randomized daily action pool; construction cards are
+# appended from the building catalog and filtered by phase.
+RANDOM_ACTION_POOL: List[Dict[str, Any]] = [
     {
         "key": "rnd_power_shift",
         "min_phase": 1,
@@ -309,15 +318,32 @@ RANDOM_ACTION_POOL: List[Dict[str, Any]] = [
         "cost": "1 Drone, 8 Fuel, 8 Power + 1 Worker",
         "effect": "+20.0x Science Points & +2 Crop Seeds",
     },
+] + [
+    {
+        "key": f"rnd_construct_{key}",
+        "min_phase": PHASE_CATALOG.get(key, 1),
+        "title": f"Construction Directive: {build_from_catalog(key).name}",
+        "action": "construct_building",
+        "arg_mode": "worker_param",
+        "param": key,
+        "preferred_role": "",
+        "cost": "Construction materials + 1 Ready Worker of any profession",
+        "effect": f"Build {build_from_catalog(key).name}; construction options are rolled as random directives",
+    }
+    for key in BUILD_TYPES
+    if build_from_catalog(key) is not None
 ]
 
 
+# This controller owns the active game and adapts simulation data for HTTP clients.
 class MissionSession:
     """Thread-safe controller bridging the simulation engine and web console."""
 
     def __init__(self) -> None:
+        """Create the initial mission and initialize browser-session state."""
         self.lock = threading.Lock()
         self.router: Any = None
+        self.difficulty = "easy"
         self.target_sols: int = 30
         self.target_sci: float = 500.0
         self.aborted: bool = False
@@ -328,6 +354,13 @@ class MissionSession:
         self.daily_set_actions: List[Dict[str, Any]] = []
         self.daily_random_actions: List[Dict[str, Any]] = []
         self.daily_usage: Dict[str, int] = {}
+        self.earth_messages: List[Dict[str, Any]] = []
+        self.offered_side_quest: Optional[Dict[str, Any]] = None
+        self.active_side_quest: Optional[Dict[str, Any]] = None
+        self.completed_side_quests: List[str] = []
+        self.early_building_unlocks: set[str] = set()
+        self.earth_message_last_sent_sol = 0
+        self.current_starting_buildings: Dict[str, int] = {}
         role_cycle = [
             "Doctor", "Engineer", "Biologist", "Geologist", "Pilot",
             "Engineer", "Biologist", "Geologist", "Pilot", "Doctor",
@@ -345,7 +378,7 @@ class MissionSession:
                 {
                     "id": f"robot-{idx}",
                     "name": f"Rover-{idx + 1:03d}",
-                    "profession": role_cycle[idx % len(role_cycle)],
+                    "profession": "Robot",
                 }
                 for idx in range(100)
             ],
@@ -362,12 +395,29 @@ class MissionSession:
         )
 
     def setup_options(self) -> Dict[str, Any]:
+        """Return the crew, resource, building, and difficulty choices for setup."""
         with self.lock:
             return {
                 "candidates": self.candidates,
                 "current_human_candidate_ids": list(self.current_human_candidate_ids),
                 "current_robot_candidate_ids": list(self.current_robot_candidate_ids),
                 "current_starting_resources": dict(self.current_starting_resources),
+                "current_starting_buildings": dict(self.current_starting_buildings),
+                "current_difficulty": self.difficulty,
+                "difficulties": [
+                    {
+                        "key": key,
+                        "label": profile["label"],
+                        "cost_multiplier": profile["cost_multiplier"],
+                        "action_multiplier": profile["action_multiplier"],
+                    }
+                    for key, profile in DIFFICULTY_PROFILES.items()
+                ],
+                "starting_buildings": [
+                    {"key": key, "name": build_from_catalog(key).name}
+                    for key in BUILD_TYPES
+                    if build_from_catalog(key) is not None
+                ],
                 "resources": [
                     {
                         "key": key,
@@ -376,6 +426,7 @@ class MissionSession:
                         "default": default,
                     }
                     for key, (maximum, default) in game.STARTING_STOCK.items()
+                    if key not in {"electricity", "dirt"}
                 ],
             }
 
@@ -389,9 +440,15 @@ class MissionSession:
         human_candidate_ids: Optional[List[str]] = None,
         robot_candidate_ids: Optional[List[str]] = None,
         starting_resources: Optional[Dict[str, float]] = None,
+        starting_buildings: Optional[Dict[str, int]] = None,
+        difficulty: str = "easy",
     ) -> Dict[str, Any]:
+        """Validate mission settings, then replace the current simulation state."""
         with self.lock:
             space = space_key if space_key in SPACE_ENVIRONMENTS else "mars"
+            difficulty_key = str(difficulty).strip().lower()
+            if difficulty_key not in DIFFICULTY_PROFILES:
+                raise ValueError("Difficulty must be easy, normal, or hard.")
             if starting_resources is not None:
                 if not isinstance(starting_resources, dict):
                     raise ValueError("Starting resources must be an object of resource amounts.")
@@ -408,6 +465,25 @@ class MissionSession:
                     maximum = game.STARTING_STOCK[key][0]
                     if not math.isfinite(numeric_amount) or not 0 <= numeric_amount <= maximum:
                         raise ValueError(f"Starting {key} must be between 0 and {maximum:g}.")
+            if starting_buildings is None:
+                building_counts: Dict[str, int] = {}
+            elif not isinstance(starting_buildings, dict):
+                raise ValueError("Starting buildings must be an object of building counts.")
+            else:
+                allowed_buildings = set(BUILD_TYPES)
+                if set(starting_buildings) - allowed_buildings:
+                    raise ValueError(
+                        f"Unknown starting building types: "
+                        f"{', '.join(sorted(set(starting_buildings) - allowed_buildings))}"
+                    )
+                building_counts = {}
+                for key, count in starting_buildings.items():
+                    if not isinstance(count, int) or isinstance(count, bool) or not 0 <= count <= 5:
+                        raise ValueError(f"Starting count for {key} must be a whole number from 0 to 5.")
+                    if count:
+                        building_counts[key] = count
+                if sum(building_counts.values()) > 15:
+                    raise ValueError("Choose no more than 15 additional starting buildings.")
             if human_candidate_ids is None and robot_candidate_ids is None:
                 human_ids = [candidate["id"] for candidate in self.candidates["humans"][:max(0, min(50, int(crew_count)))]]
                 robot_ids: List[str] = []
@@ -437,12 +513,20 @@ class MissionSession:
                 key: float((starting_resources or {}).get(key, default))
                 for key, (_, default) in game.STARTING_STOCK.items()
             }
+            self.current_starting_buildings = building_counts
+            self.difficulty = difficulty_key
             self.target_sols = max(10, min(365, int(target_sols)))
             self.target_sci = float(max(50, min(10000, target_sci)))
             self.aborted = False
             self.unlock_all_override = bool(unlock_all)
             self.announced_phases = {1}
             self.daily_usage = {}
+            self.earth_messages = []
+            self.offered_side_quest = None
+            self.active_side_quest = None
+            self.completed_side_quests = []
+            self.early_building_unlocks = set()
+            self.earth_message_last_sent_sol = 0
 
             all_buildings.clear()
             Worker.TotalCount = 0
@@ -462,7 +546,6 @@ class MissionSession:
             for candidate_id in robot_ids:
                 candidate = candidate_by_id[candidate_id]
                 robot = RobotWorker(candidate["name"])
-                robot.setType(Profession[candidate["profession"]].value)
                 selected_workers.append(robot)
 
             self.router = game.setup_game(
@@ -470,14 +553,23 @@ class MissionSession:
                 crew_count=len(human_ids),
                 workers=selected_workers,
                 starting_resources=starting_resources,
+                starting_buildings=building_counts,
+                difficulty=difficulty_key,
             )
             state = self.router.state
+            state.log.extend([
+                "HOUSTON MISSION CONTROL: Welcome, Daedalus crew. Houston is on the loop for your first Sols.",
+                "HOUSTON MISSION CONTROL: Your objective is to survive the mission and meet the science target. Protect food, water, oxygen, and power first.",
+                "HOUSTON MISSION CONTROL: Use Actions for crew-operated tasks, Buildings for staffing, Hydroponics for crop rotation, and Field Ops for exploration and launches.",
+                f"HOUSTON MISSION CONTROL: {DIFFICULTY_PROFILES[difficulty_key]['label']} difficulty is active. Adjust the challenge in Mission Settings before authorizing a new mission.",
+            ])
 
             self._evaluate_unlocks_locked(announce=False)
             self._roll_daily_actions_locked()
             return self._serialize_locked()
 
     def _roll_daily_actions_locked(self) -> None:
+        """Build the fixed and phase-appropriate random action cards for this Sol."""
         unlocks = self._compute_unlocks_locked()
         max_phase = unlocks["max_phase"]
 
@@ -486,8 +578,7 @@ class MissionSession:
             for tpl in SET_ACTION_TEMPLATES[: self.num_set_actions]
         ]
 
-        # Never offer directives from a phase that is still locked. It is fine
-        # to show fewer cards early in the mission than the configured maximum.
+        # Construction blueprints enter the random pool as their phase unlocks.
         eligible = [item for item in RANDOM_ACTION_POOL if item["min_phase"] <= max_phase]
         picked = random.sample(eligible, k=min(self.num_random_actions, len(eligible)))
         self.daily_random_actions = [
@@ -507,6 +598,7 @@ class MissionSession:
         ]
 
     def _mark_daily_card_used_locked(self, card_id: Optional[str], action_name: str) -> None:
+        """Mark the matching daily card as completed after its action succeeds."""
         for group in (self.daily_set_actions, self.daily_random_actions):
             for card in group:
                 if card_id and card["id"] == card_id:
@@ -519,11 +611,13 @@ class MissionSession:
                     return
 
     def _daily_action_limit_locked(self, action: str) -> int:
+        """Get the per-Sol limit for an action, including UI-only rerolls."""
         if action == "reroll_random_actions":
             return 1
         return daily_action_limit(self.router.state, action)
 
     def _staff_all_feasibility_locked(self) -> Dict[str, Any]:
+        """Calculate whether available specialists and robots can fill staff gaps."""
         state = self.router.state
         available: Dict[str, int] = {}
         for worker in state.workers:
@@ -534,15 +628,20 @@ class MissionSession:
         needed: Dict[str, int] = {}
         for bld in state.buildings:
             assigned = bld._profession_counts()
+            robot_slots = assigned.get("Robot", 0)
             for profession, (minimum, _) in type(bld).required_professions.items():
-                needed[profession] = needed.get(profession, 0) + max(
-                    0, minimum - assigned.get(profession, 0)
-                )
-        shortages = {
+                missing = max(0, minimum - assigned.get(profession, 0))
+                covered_by_robots = min(missing, robot_slots)
+                robot_slots -= covered_by_robots
+                needed[profession] = needed.get(profession, 0) + missing - covered_by_robots
+        robot_count = available.get("Robot", 0)
+        role_shortages = {
             profession: count - available.get(profession, 0)
             for profession, count in needed.items()
             if count > available.get(profession, 0)
         }
+        robots_needed = sum(role_shortages.values())
+        shortages = role_shortages if robots_needed > robot_count else {}
         return {
             "feasible": not shortages,
             "needed": needed,
@@ -551,6 +650,7 @@ class MissionSession:
         }
 
     def _compute_unlocks_locked(self) -> Dict[str, Any]:
+        """Derive phase and rocket clearances from the current mission progress."""
         state = self.router.state
         sol = int(state.sol)
         sci = float(state.science_points)
@@ -628,6 +728,7 @@ class MissionSession:
         }
 
     def _evaluate_unlocks_locked(self, announce: bool = True) -> None:
+        """Record newly reached phases and optionally add a clearance log message."""
         unlocks = self._compute_unlocks_locked()
         for pid_str, info in unlocks["phases"].items():
             pid = int(pid_str)
@@ -636,18 +737,331 @@ class MissionSession:
                 if announce:
                     self.router.state.log.append(f"CLEARANCE GRANTED: {info['name']} systems online.")
 
+    def _solar_flare_active_locked(self) -> bool:
+        """Report whether an active solar flare is affecting the mission."""
+        return any(
+            type(incident).__name__ == "SolarFlare"
+            for incident in self.router.state.hazard_manager.active_incidents
+        )
+
+    def _communications_blockers_locked(self) -> List[str]:
+        """List active incidents that currently prevent Earth communications."""
+        return [
+            incident.name
+            for incident in self.router.state.hazard_manager.active_incidents
+            if getattr(incident, "blocks_communications", False)
+        ]
+
+    def _record_depletions_locked(self, before: Dict[str, float]) -> None:
+        """Record newly exhausted stocks once and add an emergency log entry."""
+        state = self.router.state
+        recorded = {
+            (event["resource"], event["sol"])
+            for event in state.resource_depletion_events
+        }
+        for name, previous in before.items():
+            inventory = state.resources.get(name)
+            if (
+                previous > 0
+                and inventory is not None
+                and inventory.getResources() <= 0
+                and (name, state.sol) not in recorded
+            ):
+                state.resource_depletion_events.append({
+                    "resource": name,
+                    "sol": state.sol,
+                    "crises": [
+                        incident.name
+                        for incident in state.hazard_manager.active_incidents
+                    ],
+                })
+                state.log.append(
+                    f"EMERGENCY: {name} was fully depleted on Sol {state.sol}."
+                )
+
+    def _side_quest_progress_locked(
+        self, quest: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Summarize objective progress since a side quest was accepted."""
+        if quest is None:
+            return {}
+        if quest.get("baseline") is None:
+            target = float(quest["objective_target"])
+            return {
+                "progress": 0.0,
+                "target": target,
+                "progress_pct": 0.0,
+                "ready_to_complete": False,
+            }
+        state = self.router.state
+        kind = quest["objective_kind"]
+        if kind == "mined_units":
+            current = float(state.mined_units) - float(quest["baseline"])
+        elif kind == "science":
+            current = float(state.science_points) - float(quest["baseline"])
+        else:
+            current = sum(
+                type(building).__name__ == "PowerPlant"
+                for building in state.buildings
+            ) - int(quest["baseline"])
+        target = float(quest["objective_target"])
+        progress = max(0.0, min(target, current))
+        return {
+            "progress": round(progress, 1),
+            "target": target,
+            "progress_pct": round(min(100.0, progress / target * 100.0), 1),
+            "ready_to_complete": progress >= target,
+        }
+
+    def _public_quest_locked(
+        self, quest: Optional[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        """Return the client-safe fields for a side quest and its progress."""
+        if quest is None:
+            return None
+        result = {
+            key: value for key, value in quest.items()
+            if key != "baseline"
+        }
+        result.update(self._side_quest_progress_locked(quest))
+        return result
+
+    def _send_earth_message_locked(self, message: str) -> Dict[str, Any]:
+        """Validate and send one message when a satellite link is available."""
+        state = self.router.state
+        if self._communications_blockers_locked():
+            blockers = ", ".join(self._communications_blockers_locked())
+            return {"ok": False, "message": f"Communications are blocked by {blockers}."}
+        if state.active_satellites <= 0:
+            return {"ok": False, "message": "No active satellite is available for Earth communications."}
+        if self.earth_message_last_sent_sol == state.sol:
+            return {"ok": False, "message": "Only one Earth transmission can be sent per Sol."}
+        text = str(message).strip()[:240]
+        if not text:
+            return {"ok": False, "message": "Enter a message before transmitting to Earth."}
+
+        self.earth_message_last_sent_sol = state.sol
+        self.earth_messages.append({"from": "Colony", "sol": state.sol, "text": text})
+        if self.active_side_quest is not None:
+            reply = "Earth received your message. Complete the active side quest before requesting another task."
+            self.earth_messages.append({"from": "Earth", "sol": state.sol, "text": reply})
+            state.log.append("Satellite transmission received by Earth.")
+            return {"ok": True, "message": reply}
+        if self.offered_side_quest is not None:
+            reply = "Earth received your message. Review the side quest already awaiting acceptance."
+            self.earth_messages.append({"from": "Earth", "sol": state.sol, "text": reply})
+            state.log.append("Satellite transmission received by Earth.")
+            return {"ok": True, "message": reply}
+
+        if len(self.completed_side_quests) < len(SIDE_QUESTS):
+            template = SIDE_QUESTS[len(self.completed_side_quests)]
+            self.offered_side_quest = {
+                **template,
+                "status": "offered",
+                "baseline": None,
+            }
+            reply = (
+                f"Earth reply: Side quest available — {template['name']}. "
+                f"{template['message']}"
+            )
+        else:
+            reply = "Earth received your message. No new side quests are available."
+        self.earth_messages.append({"from": "Earth", "sol": state.sol, "text": reply})
+        state.log.append("Satellite transmission received by Earth.")
+        return {"ok": True, "message": reply}
+
+    def _accept_side_quest_locked(self) -> Dict[str, Any]:
+        """Accept Earth's offered objective and capture its progress baseline."""
+        if self._communications_blockers_locked():
+            blockers = ", ".join(self._communications_blockers_locked())
+            return {"ok": False, "message": f"Communications are blocked by {blockers}."}
+        if self.router.state.active_satellites <= 0:
+            return {"ok": False, "message": "An active satellite is required to accept Earth side quests."}
+        if self.offered_side_quest is None:
+            return {"ok": False, "message": "No Earth side quest is waiting for acceptance."}
+        if self.active_side_quest is not None:
+            return {"ok": False, "message": "Complete the active side quest before accepting another."}
+        quest = self.offered_side_quest
+        kind = quest["objective_kind"]
+        state = self.router.state
+        if kind == "mined_units":
+            baseline = float(state.mined_units)
+        elif kind == "science":
+            baseline = float(state.science_points)
+        else:
+            baseline = sum(
+                type(building).__name__ == "PowerPlant"
+                for building in state.buildings
+            )
+        self.active_side_quest = {**quest, "status": "active", "baseline": baseline}
+        self.offered_side_quest = None
+        state.log.append(f"Accepted Earth side quest: {quest['name']}.")
+        return {"ok": True, "message": f"Accepted side quest: {quest['name']}."}
+
+    def _complete_side_quest_locked(self) -> Dict[str, Any]:
+        """Award a completed objective's research and building unlock."""
+        if self._communications_blockers_locked():
+            blockers = ", ".join(self._communications_blockers_locked())
+            return {"ok": False, "message": f"Communications are blocked by {blockers}."}
+        if self.router.state.active_satellites <= 0:
+            return {"ok": False, "message": "An active satellite is required to confirm quest completion with Earth."}
+        quest = self.active_side_quest
+        if quest is None:
+            return {"ok": False, "message": "There is no active Earth side quest."}
+        progress = self._side_quest_progress_locked(quest)
+        if not progress["ready_to_complete"]:
+            return {
+                "ok": False,
+                "message": (
+                    f"Side quest objective incomplete: {quest['objective_text']} "
+                    f"({progress['progress']:g}/{progress['target']:g})."
+                ),
+            }
+        state = self.router.state
+        reward = float(quest["reward_research"])
+        research = state.resources.get("research")
+        if research is not None:
+            research.addResources(reward)
+        state.science_points += reward
+        building_key = quest["unlock_building"]
+        self.early_building_unlocks.add(building_key)
+        self.completed_side_quests.append(quest["id"])
+        self.earth_messages.append({
+            "from": "Earth",
+            "sol": state.sol,
+            "text": (
+                f"Quest complete: {quest['name']}. Earth granted +{reward:g} "
+                f"research and authorized early construction of {building_key}."
+            ),
+        })
+        self.active_side_quest = None
+        state.log.append(
+            f"Earth side quest complete: +{reward:g} research/science; "
+            f"{building_key} blueprint unlocked early."
+        )
+        return {
+            "ok": True,
+            "message": f"Side quest complete: +{reward:g} research and early access to {building_key}.",
+        }
+
+    def _available_card_worker_locked(self, card: Dict[str, Any]) -> List[int]:
+        """Choose a ready worker, preferring the card's listed specialist role."""
+        ready = [
+            (idx, worker)
+            for idx, worker in enumerate(self.router.state.workers)
+            if worker.isAvailable()
+        ]
+        preferred = card.get("preferred_role")
+        if preferred:
+            specialist = next(
+                (idx for idx, worker in ready if worker.getType().name == preferred),
+                None,
+            )
+            if specialist is not None:
+                return [specialist]
+        return [ready[0][0]] if ready else []
+
+    def _take_all_actions_locked(self) -> Dict[str, Any]:
+        """Attempt each available daily card once and return the results."""
+        state = self.router.state
+        resources_before = {
+            name: float(inventory.getResources())
+            for name, inventory in state.resources.items()
+        }
+        succeeded: List[str] = []
+        skipped: List[str] = []
+        gates = {
+            "mine": "mining_refining",
+            "produce_fuel": "mining_refining",
+            "refine_materials": "mining_refining",
+            "deploy_rover": "recon_expeditions",
+            "fly_drone": "recon_expeditions",
+            "run_research": "research_academy",
+            "manufacture": "manufacturing",
+            "launch_satellite": "orbital_launches",
+        }
+        systems = self._compute_unlocks_locked()["systems"]
+        for card in self.daily_set_actions + self.daily_random_actions:
+            if card["used_today"]:
+                continue
+            action = card["action"]
+            if action in gates and not systems.get(gates[action], False):
+                skipped.append(card["title"])
+                continue
+            args: List[Any] = []
+            if card["arg_mode"] == "worker":
+                args = self._available_card_worker_locked(card)
+            elif card["arg_mode"] == "worker_param":
+                worker_args = self._available_card_worker_locked(card)
+                if not worker_args:
+                    skipped.append(card["title"])
+                    continue
+                args = [*worker_args, card["param"]]
+            elif action == "construct_building":
+                worker_args = self._available_card_worker_locked(card)
+                if not worker_args:
+                    skipped.append(card["title"])
+                    continue
+                args = [*worker_args, card["param"]]
+            usage_key = daily_action_usage_key(action, tuple(args))
+            limit = self._daily_action_limit_locked(usage_key)
+            if limit and state.daily_action_usage.get(usage_key, 0) >= limit:
+                skipped.append(card["title"])
+                continue
+            if card["arg_mode"] != "none" and not args:
+                skipped.append(card["title"])
+                continue
+            if self.router.execute(action, *args):
+                card["used_today"] = True
+                succeeded.append(card["title"])
+            else:
+                skipped.append(card["title"])
+        self._record_depletions_locked(resources_before)
+        message = (
+            f"Ran {len(succeeded)} available action(s); skipped {len(skipped)} "
+            "unavailable or failed action(s)."
+        )
+        state.log.append(message)
+        return {
+            "ok": bool(succeeded),
+            "message": message,
+            "state": self._serialize_locked(),
+            "actions_run": succeeded,
+            "actions_skipped": skipped,
+        }
+
     def execute_action(self, action: str, args: List[Any], card_id: Optional[str] = None) -> Dict[str, Any]:
+        """Validate UI-specific rules, execute an action, and return fresh state."""
         with self.lock:
             state = self.router.state
             unlocks = self._compute_unlocks_locked()
             sys_locks = unlocks["systems"]
 
+            if action == "take_all_actions":
+                return self._take_all_actions_locked()
+
+            if action == "send_earth_message":
+                result = self._send_earth_message_locked(str(args[0]) if args else "")
+                result["state"] = self._serialize_locked()
+                return result
+
+            if action == "accept_side_quest":
+                result = self._accept_side_quest_locked()
+                result["state"] = self._serialize_locked()
+                return result
+
+            if action == "complete_side_quest":
+                result = self._complete_side_quest_locked()
+                result["state"] = self._serialize_locked()
+                return result
+
             if action in ("assign_job", "university_train"):
-                return {
-                    "ok": False,
-                    "message": "Crew specialties are permanent for this mission and cannot be reassigned.",
-                    "state": self._serialize_locked(),
-                }
+                if action == "university_train":
+                    return {
+                        "ok": False,
+                        "message": "University training cannot change specialties; use the crew roster's Change Specialty control.",
+                        "state": self._serialize_locked(),
+                    }
 
             if action == "abort_mission":
                 self.aborted = True
@@ -687,12 +1101,16 @@ class MissionSession:
                         if not self.router.execute("unstaff_building", old_idx, w_idx):
                             last_msg = state.log[-1] if state.log else "Could not release worker."
                             return {"ok": False, "message": last_msg, "state": self._serialize_locked()}
+                        last_msg = state.log[-1] if state.log else (
+                            f"{worker.Name} will be available after Sol {state.sol + 1}."
+                        )
+                        return {
+                            "ok": True,
+                            "message": f"{last_msg} Assign them to the new building after the cooldown.",
+                            "state": self._serialize_locked(),
+                        }
 
                     ok = self.router.execute("staff_building", target_b_idx, w_idx)
-                    if not ok and old_idx is not None:
-                        # Roll back the move so a rejected destination never leaves
-                        # the worker unexpectedly unassigned.
-                        self.router.execute("staff_building", old_idx, w_idx)
                     last_msg = state.log[-1] if state.log else "Worker assignment unchanged."
                     return {"ok": bool(ok), "message": last_msg, "state": self._serialize_locked()}
                 except Exception as err:
@@ -724,11 +1142,12 @@ class MissionSession:
                     "state": self._serialize_locked(),
                 }
 
+            usage_key = daily_action_usage_key(action, tuple(args))
             daily_limit = self._daily_action_limit_locked(action)
             daily_used = (
-                self.daily_usage.get(action, 0)
+                self.daily_usage.get(usage_key, 0)
                 if action == "reroll_random_actions"
-                else state.daily_action_usage.get(action, 0)
+                else state.daily_action_usage.get(usage_key, 0)
             )
             if daily_limit and daily_used >= daily_limit:
                 return {
@@ -737,10 +1156,10 @@ class MissionSession:
                     "state": self._serialize_locked(),
                 }
 
-            if action == "construct_building" and args:
-                b_key = str(args[0]).lower()
+            if action == "construct_building" and len(args) > 1:
+                b_key = str(args[1]).lower()
                 req_phase = PHASE_CATALOG.get(b_key, 1)
-                if req_phase > unlocks["max_phase"]:
+                if req_phase > unlocks["max_phase"] and b_key not in self.early_building_unlocks:
                     req_txt = unlocks["phases"][str(req_phase)]["requirement"]
                     return {
                         "ok": False,
@@ -796,9 +1215,15 @@ class MissionSession:
                     "state": self._serialize_locked(),
                 }
 
+            resources_before = {
+                name: float(inventory.getResources())
+                for name, inventory in state.resources.items()
+            }
             before_len = len(state.log)
             try:
                 result = self.router.execute(action, *args)
+                if action != "advance_sol":
+                    self._record_depletions_locked(resources_before)
                 new_entries = state.log[before_len:]
                 msg = new_entries[-1] if new_entries else f"Executed {action}."
                 self._evaluate_unlocks_locked(announce=True)
@@ -813,37 +1238,74 @@ class MissionSession:
                 return {"ok": False, "message": f"{type(err).__name__}: {err}", "state": self._serialize_locked()}
 
     def snapshot(self) -> Dict[str, Any]:
+        """Take a thread-safe snapshot of the current simulation for the UI."""
         with self.lock:
             return self._serialize_locked()
 
     def _serialize_locked(self) -> Dict[str, Any]:
+        """Convert the simulation model into JSON-ready browser state."""
         state = self.router.state
         unlocks = self._compute_unlocks_locked()
         staffing = self._staff_all_feasibility_locked()
         active_units = [
             w for w in state.workers
-            if not getattr(w, "retired", False) and w.getHealth() > 0
+            if not getattr(w, "retired", False)
+            and w.getHealth() > 0
+            and (
+                not getattr(w, "is_robot", False)
+                or getattr(w, "powered_on", True)
+            )
         ]
         active_crew = [w for w in state.workers if not getattr(w, "is_robot", False) and w in active_units]
-        active_robots = [w for w in state.workers if getattr(w, "is_robot", False) and w in active_units]
+        active_robots = [
+            w for w in state.workers
+            if getattr(w, "is_robot", False)
+            and w in active_units
+            and getattr(w, "powered_on", True)
+        ]
         total_volume = sum(
             float(getattr(b, "volume", 100))
             for b in state.buildings
             if getattr(b, "is_on", True)
         )
 
-        resources_out: Dict[str, Dict[str, float]] = {}
+        resources_out: Dict[str, Dict[str, Any]] = {}
         for name, inv in state.resources.items():
             cur = float(inv.getResources())
             cap = float(inv.getMaxResources())
             daily = state.daily_report.get(name, {"added": 0.0, "subtracted": 0.0, "net": 0.0})
+            eta = None
+            warning = ""
+            pct = (cur / cap * 100.0) if cap > 0 else 0.0
+            if cur <= 0 and cap > 0 and name != "research":
+                eta = 0.0
+                warning = "EMERGENCY: DEPLETED"
+            else:
+                if name != "research" and cap > 0 and pct < 10:
+                    warning = "CRITICAL: below 10%"
+                elif name != "research" and cap > 0 and pct < 20:
+                    warning = "WARNING: below 20%"
+            if eta is None and float(daily.get("net", 0.0)) < 0:
+                eta = cur / abs(float(daily["net"]))
+                if eta <= 1:
+                    eta_warning = "DEPLETION RISK: within 1 Sol"
+                elif eta <= 5:
+                    eta_warning = "DEPLETION RISK: within 5 Sols"
+                elif eta <= 10:
+                    eta_warning = "DEPLETION RISK: within 10 Sols"
+                else:
+                    eta_warning = ""
+                if eta_warning:
+                    warning = f"{warning} · {eta_warning}" if warning else eta_warning
             resources_out[name] = {
                 "current": round(cur, 2),
                 "max": round(cap, 2),
-                "pct": round((cur / cap * 100.0) if cap > 0 else 0.0, 1),
+                "pct": round(pct, 1),
                 "net": round(float(daily.get("net", 0.0)), 2),
                 "added": round(float(daily.get("added", 0.0)), 2),
                 "subtracted": round(float(daily.get("subtracted", 0.0)), 2),
+                "depletion_eta_sols": round(eta, 1) if eta is not None else None,
+                "warning": warning,
             }
 
         buildings_out: List[Dict[str, Any]] = []
@@ -880,6 +1342,8 @@ class MissionSession:
                 kind = "University"
             elif isinstance(bld, LogisticsBuilding):
                 kind = "Logistics"
+            elif isinstance(bld, ServiceBuilding):
+                kind = "Service"
             elif isinstance(bld, ResourceBuilding):
                 kind = "Producer"
 
@@ -892,6 +1356,13 @@ class MissionSession:
                 "is_operational": bool(bld.is_operational()),
                 "volume": float(getattr(bld, "volume", 100)),
                 "safety": round(float(getattr(bld, "safety_rating", 0)), 1),
+                "health": round(float(getattr(bld, "health", 100.0)), 1),
+                "danger_rating": (
+                    3 if bld.health < 20 else
+                    2 if bld.health < 40 else
+                    1 if bld.health < 70 else 0
+                ),
+                "production_boost": round(float(getattr(bld, "production_boost", 1.0)), 2),
                 "workers_count": int(bld.number_of_workers),
                 "max_workers": int(getattr(b_cls, "max_worker_capacity", 0)),
                 "required_professions": req_profs,
@@ -901,11 +1372,23 @@ class MissionSession:
                 "local_storage": local_storage,
                 "farm_crop": getattr(bld, "crop", None),
                 "farm_product": getattr(bld, "product_type", None),
+                "transfer_limit": float(getattr(bld, "daily_transfer_limit", 0)),
+                "transferred_today": float(getattr(bld, "transferred_today", 0)),
+                "service_capacity": int(getattr(bld, "max_serviceable_buildings", 0)),
+                "maintenance_targets": [
+                    target.name
+                    for target in getattr(bld, "maintenance_targets", [])
+                ],
+                "maintenance_target_indices": [
+                    state.buildings.index(target)
+                    for target in getattr(bld, "maintenance_targets", [])
+                    if target in state.buildings
+                ],
             })
 
         prof_index = {
             "Unassigned": 0, "Doctor": 1, "Engineer": 2,
-            "Biologist": 3, "Geologist": 4, "Pilot": 5,
+            "Biologist": 3, "Geologist": 4, "Pilot": 5, "Robot": 0,
         }
         workers_out: List[Dict[str, Any]] = []
         for idx, w in enumerate(state.workers):
@@ -954,6 +1437,7 @@ class MissionSession:
             {
                 "name": inc.name,
                 "description": inc.description,
+                "cause": inc.definition,
                 "severity": int(inc.severity),
                 "turns_active": int(getattr(inc, "turns_active", 0)),
             }
@@ -961,13 +1445,16 @@ class MissionSession:
         ]
         risk_profiles = []
         for incident_type in state.hazard_manager.incident_pool:
+            if state.space_key not in incident_type.eligible_environments:
+                continue
             incident = incident_type()
             risk_profiles.append({
                 "name": incident.name,
                 "definition": incident.definition,
                 "response": incident.description,
                 "severity": int(incident.severity),
-                "probability_per_sol": state.hazard_manager.DAILY_CHANCE_PER_HAZARD,
+                "probability_per_sol": state.hazard_manager.chance_per_hazard(state),
+                "environments": sorted(incident_type.eligible_environments),
             })
 
         catalog_out = []
@@ -982,11 +1469,20 @@ class MissionSession:
                 "name": sample.name,
                 "type": s_cls.__name__,
                 "phase": req_phase,
-                "unlocked": req_phase <= unlocks["max_phase"],
+                "unlocked": (
+                    req_phase <= unlocks["max_phase"]
+                    or key in self.early_building_unlocks
+                ),
+                "early_unlocked": key in self.early_building_unlocks,
                 "unlock_req": unlocks["phases"][str(req_phase)]["requirement"],
-                "power_cost": round(float(getattr(sample, "production_cost", 500)) * 0.05, 1),
-                "steel_cost": 20,
-                "aluminum_cost": 20,
+                "power_cost": round(
+                    float(getattr(sample, "production_cost", 500))
+                    * 0.05
+                    * DIFFICULTY_PROFILES[self.difficulty]["cost_multiplier"],
+                    1,
+                ),
+                "steel_cost": round(20 * DIFFICULTY_PROFILES[self.difficulty]["cost_multiplier"], 1),
+                "aluminum_cost": round(20 * DIFFICULTY_PROFILES[self.difficulty]["cost_multiplier"], 1),
                 "volume": float(getattr(sample, "volume", 100)),
                 "max_workers": int(getattr(s_cls, "max_worker_capacity", 0)),
                 "required_professions": {
@@ -1012,10 +1508,10 @@ class MissionSession:
         mission_over = False
         mission_status = "ACTIVE"
         mission_reason = ""
-        if state.workers and not active_units:
+        if not active_crew and not active_robots:
             mission_over = True
             mission_status = "FAILED"
-            mission_reason = "All humans and robots are inactive. Life support reserves depleted or crises overwhelmed the colony."
+            mission_reason = "Mission failure: all human colonists have died and all robots are inactive."
         elif self.aborted:
             mission_over = True
             mission_status = "ABORTED"
@@ -1040,10 +1536,49 @@ class MissionSession:
             "elapsed_hours": int(getattr(state.time_engine, "elapsed_hours", (state.sol - 1) * 24)),
             "space_key": state.space_key,
             "space_label": state.space["label"],
+            "difficulty": self.difficulty,
+            "difficulty_profile": {
+                **DIFFICULTY_PROFILES[self.difficulty],
+                "key": self.difficulty,
+            },
             "environments": SPACE_ENVIRONMENTS,
             "science_points": round(float(state.science_points), 1),
             "target_sci": self.target_sci,
             "active_satellites": int(state.active_satellites),
+            "hydroponics_rotation_next_crop": (
+                ("lettuce", "wheat", "flax", "sunflower")[
+                    state.hydroponics_rotation_index % 4
+                ]
+            ),
+            "eva_suits": {
+                "ready": int(state.eva_suits),
+                "damaged": int(state.damaged_eva_suits),
+            },
+            "exploration_wear": dict(state.exploration_wear),
+            "crisis_events": list(state.crisis_events),
+            "resource_depletion_events": list(state.resource_depletion_events),
+            "pending_rockets": [
+                {
+                    **shipment,
+                    "elapsed_sols": max(0, min(
+                        shipment["transit_sols"],
+                        state.sol - shipment["launched_sol"],
+                    )),
+                    "progress_pct": round(
+                        max(0.0, min(
+                            100.0,
+                            (state.sol - shipment["launched_sol"])
+                            / shipment["transit_sols"] * 100.0,
+                        )),
+                        1,
+                    ),
+                }
+                for shipment in state.pending_rockets
+            ],
+            "rocket_transit_estimates": {
+                destination: rocket_transit_sols(destination, state.sol)
+                for destination in ("mars", "moon")
+            },
             "active_crew_count": len(active_crew),
             "total_crew_count": sum(not getattr(w, "is_robot", False) for w in state.workers),
             "active_robot_count": len(active_robots),
@@ -1073,16 +1608,39 @@ class MissionSession:
                     ),
                     "limit": self._daily_action_limit_locked(action),
                 }
-                for action in set(DAILY_ACTION_LIMITS) | {
-                    "reroll_random_actions", "run_research", "transfer_logistics",
-                    "operate_factory", "configure_farm", "toggle_building"
-                }
+                for action in (
+                    set(DAILY_ACTION_LIMITS)
+                    | {
+                        "reroll_random_actions", "run_research", "transfer_logistics",
+                        "operate_factory", "configure_farm", "toggle_building",
+                        "fabricate_robot", "boost_production",
+                    }
+                    | {
+                        f"hydroponics:{crop}"
+                        for crop in ("lettuce", "wheat", "flax", "sunflower")
+                    }
+                )
             },
             "daily_actions": {
                 "num_set_actions": self.num_set_actions,
                 "num_random_actions": self.num_random_actions,
                 "set": self.daily_set_actions,
                 "random": self.daily_random_actions,
+            },
+            "earth_comms": {
+                "available": int(state.active_satellites) > 0,
+                "solar_flare": self._solar_flare_active_locked(),
+                "blockers": self._communications_blockers_locked(),
+                "can_send": (
+                    int(state.active_satellites) > 0
+                    and not self._communications_blockers_locked()
+                    and self.earth_message_last_sent_sol != state.sol
+                ),
+                "messages": self.earth_messages,
+                "offered_quest": self._public_quest_locked(self.offered_side_quest),
+                "active_quest": self._public_quest_locked(self.active_side_quest),
+                "completed_quests": list(self.completed_side_quests),
+                "early_building_unlocks": sorted(self.early_building_unlocks),
             },
             "mission_over": mission_over,
             "mission_status": mission_status,
@@ -1094,7 +1652,7 @@ class MissionSession:
             "crises": crises_out,
             "risk_profiles": risk_profiles,
             "combined_daily_hazard_pct": round(
-                (1.0 - (1.0 - state.hazard_manager.DAILY_CHANCE_PER_HAZARD) ** len(risk_profiles)) * 100,
+                state.hazard_manager.last_risk_score * 100,
                 2,
             ),
             "catalog": catalog_out,
@@ -1102,6 +1660,8 @@ class MissionSession:
         }
 
 
+# The browser client is served as one self-contained document so the app has no
+# separate asset build or runtime dependency.
 HTML_PAGE = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1109,6 +1669,7 @@ HTML_PAGE = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>LIVING ON RED — NASA Space Apps Challenge 2026 | Daedalus Team</title>
 <style>
+  /* Shared colors, typography, and layout primitives used by every console pane. */
   :root {
     --bg: #080b11;
     --surface: #0e131d;
@@ -1266,6 +1827,9 @@ HTML_PAGE = """<!DOCTYPE html>
 
   .guided-banner {
     display: none;
+    position: sticky;
+    top: 84px;
+    z-index: 29;
     background: linear-gradient(90deg, #0c1e3a, #102a4e);
     border-bottom: 2px solid #38bdf8;
     padding: 12px 18px;
@@ -1273,6 +1837,7 @@ HTML_PAGE = """<!DOCTYPE html>
     justify-content: space-between;
     gap: 14px;
     flex-wrap: wrap;
+    box-shadow: 0 8px 18px rgba(0, 0, 0, 0.35);
   }
   .guided-banner.visible { display: flex; }
   .step-counter {
@@ -1286,7 +1851,8 @@ HTML_PAGE = """<!DOCTYPE html>
     letter-spacing: 0.8px;
   }
   .guided-title { font-size: 14px; font-weight: 700; color: #fff; margin-left: 8px; }
-  .guided-body { font-size: 12.5px; color: #bae6fd; margin-top: 4px; }
+  .guided-body { font-size: 13px; line-height: 1.45; color: #bae6fd; margin-top: 4px; max-width: 900px; }
+  .tutorial-spotlight { scroll-margin-top: 190px; }
 
   /* ==================== CONSISTENT FLIGHT CONSOLE UI ==================== */
   .topbar {
@@ -1549,6 +2115,7 @@ HTML_PAGE = """<!DOCTYPE html>
   .log-entry.crit { color: var(--danger-hi); font-weight: 700; }
   .log-entry.sol { color: #60a5fa; font-weight: 700; }
   .log-entry.unlock { color: var(--ok-hi); font-weight: 700; }
+  .log-entry.houston { color: #c4b5fd; }
 
   .toast-msg {
     position: fixed;
@@ -1670,6 +2237,21 @@ HTML_PAGE = """<!DOCTYPE html>
     text-align: left;
   }
   .manual-table th { background: var(--bg); color: var(--muted); font-family: var(--mono); font-size: 11px; }
+  /* Floating maintenance controls are shown only while a Service Building is selected. */
+  .maintenance-dock {
+    display: none;
+    position: fixed;
+    right: 12px;
+    bottom: 12px;
+    z-index: 31;
+    width: min(460px, calc(100vw - 24px));
+    padding: 8px;
+    box-shadow: 0 8px 26px rgba(0, 0, 0, 0.55);
+  }
+  .maintenance-dock select { min-width: 180px; max-width: 240px; }
+  @media (max-width: 650px) {
+    .maintenance-dock { right: 6px; bottom: 6px; width: calc(100vw - 12px); }
+  }
 </style>
 </head>
 <body>
@@ -1697,7 +2279,7 @@ HTML_PAGE = """<!DOCTYPE html>
     <div class="panel-header">
       <div>
         <h2>CREW MANIFEST &amp; SPECIALIST BRIEFING</h2>
-        <div class="label-mono">Each crew member holds a permanent NASA mission specialty that cannot be changed.</div>
+        <div class="label-mono">Crew specialties may be reassigned; the specialist becomes available after one Sol.</div>
       </div>
       <span class="status-pill role" id="crewIntroEnv">MARS SURFACE</span>
     </div>
@@ -1719,6 +2301,67 @@ HTML_PAGE = """<!DOCTYPE html>
   </div>
 </div>
 
+<div class="modal-wrap" id="firstRunModal" role="dialog" aria-modal="true" aria-labelledby="firstRunTitle">
+  <div class="modal-box" style="max-width:760px;">
+    <div class="panel-header">
+      <div>
+        <div class="label-mono">HOUSTON MISSION CONTROL // PRE-LAUNCH BRIEFING</div>
+        <h2 id="firstRunTitle"></h2>
+      </div>
+      <span class="status-pill op" id="firstRunCounter"></span>
+    </div>
+    <p id="firstRunBody" style="font-size:14px;line-height:1.6;"></p>
+    <div class="notice-strip"><strong>Houston:</strong> Mission Control is on your telemetry loop. I’ll explain the systems, track colony conditions, and send Earth updates as each Sol closes.</div>
+    <div class="ctrl-row" style="justify-content:space-between;margin-top:12px;">
+      <button onclick="moveFirstRunSlide(-1)" id="firstRunBack">Back</button>
+      <button class="btn-mars" onclick="moveFirstRunSlide(1)" id="firstRunNext">Continue</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-wrap" id="crisisPopup" role="dialog" aria-modal="true" aria-labelledby="crisisPopupTitle">
+  <div class="modal-box" style="max-width:680px;">
+    <div class="panel-header">
+      <div>
+        <div class="label-mono">HOUSTON MISSION CONTROL // NEW INCIDENT</div>
+        <h2 id="crisisPopupTitle"></h2>
+      </div>
+      <span class="status-pill off" id="crisisPopupSeverity"></span>
+    </div>
+    <div class="manual-section">
+      <h3>WHAT HAPPENED</h3>
+      <p id="crisisPopupCause"></p>
+    </div>
+    <div class="manual-section">
+      <h3>IMMEDIATE PROBLEM &amp; RESPONSE</h3>
+      <p id="crisisPopupDescription"></p>
+    </div>
+    <div class="ctrl-row" style="justify-content:flex-end;margin-top:12px;">
+      <button class="btn-warn" onclick="closeCrisisPopup()">Acknowledge Incident</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-wrap" id="depletionPopup" role="dialog" aria-modal="true" aria-labelledby="depletionPopupTitle">
+  <div class="modal-box" style="max-width:720px;">
+    <div class="panel-header">
+      <div>
+        <div class="label-mono">COLONY EMERGENCY // RESOURCE EXHAUSTED</div>
+        <h2 id="depletionPopupTitle"></h2>
+      </div>
+      <span class="status-pill off">IMMEDIATE RESPONSE</span>
+    </div>
+    <p id="depletionPopupSummary"></p>
+    <div class="manual-section">
+      <h3>CONSERVATION OPTIONS</h3>
+      <div id="depletionPopupActions"></div>
+    </div>
+    <div class="ctrl-row" style="justify-content:flex-end;margin-top:12px;">
+      <button class="btn-warn" onclick="closeDepletionPopup()">Close Emergency Panel</button>
+    </div>
+  </div>
+</div>
+
 <!-- ==================== BUILDING WORKERS & ASSIGNMENT MODAL ==================== -->
 <div class="modal-wrap" id="bldWorkersModal">
   <div class="modal-box" style="max-width:740px;">
@@ -1731,7 +2374,7 @@ HTML_PAGE = """<!DOCTYPE html>
     </div>
 
     <div class="notice-strip" style="margin-top:8px;">
-      <strong>Put Workers to Work:</strong> Only specialists matching this building's required professions can be assigned here. Reassigning a worker automatically unstaffs them from their previous post.
+      <strong>Put Workers to Work:</strong> Specialists matching this building's required professions or universal Robots can be assigned here. Reassigning a worker automatically unstaffs them from their previous post.
     </div>
 
     <div style="margin-top:10px;">
@@ -1758,6 +2401,7 @@ HTML_PAGE = """<!DOCTYPE html>
 
   <div class="kpi-strip">
     <div class="kpi">SOL <strong id="kpiSol">1/30</strong> (<span id="kpiHrs">0h</span>)</div>
+    <div class="kpi">DIFFICULTY <strong id="kpiDifficulty">EASY</strong></div>
     <div class="kpi">HUMANS <strong id="kpiCrew">6/6</strong></div>
     <div class="kpi">ROBOTS <strong id="kpiRobots">0/0</strong></div>
     <div class="kpi">VOL <strong id="kpiVol">1300m&sup3;</strong></div>
@@ -1773,7 +2417,6 @@ HTML_PAGE = """<!DOCTYPE html>
     <button onclick="openCrewIntro()">Meet Crew</button>
     <button class="btn-primary" onclick="startTutorial()">Tutorial</button>
     <button onclick="openManual()">Manual</button>
-    <button onclick="openSetupModal()">New Mission</button>
     <button class="btn-danger" onclick="sendAction('abort_mission', [])">Abort</button>
   </div>
 </header>
@@ -1788,7 +2431,7 @@ HTML_PAGE = """<!DOCTYPE html>
 <div class="guided-banner" id="guidedBanner">
   <div>
     <div>
-      <span class="step-counter" id="tutStepTag">STEP 1 OF 7</span>
+      <span class="step-counter" id="tutStepTag">STEP 1 OF 8</span>
       <span class="guided-title" id="tutStepTitle">Review Life Support Vitals</span>
     </div>
     <div class="guided-body" id="tutStepDesc"></div>
@@ -1805,9 +2448,9 @@ HTML_PAGE = """<!DOCTYPE html>
     <nav class="nav-tabs" id="navTabs">
       <button class="nav-tab active" data-pane="ops" onclick="selectPane('ops', this)">1. Life Support &amp; Stockpile</button>
       <button class="nav-tab" data-pane="buildings" onclick="selectPane('buildings', this)">2. Buildings &amp; Staffing</button>
-      <button class="nav-tab" data-pane="actions" onclick="selectPane('actions', this)">3. Actions</button>
-      <button class="nav-tab" data-pane="crew" onclick="selectPane('crew', this)">4. Crew Roster</button>
-      <button class="nav-tab" data-pane="construct" onclick="selectPane('construct', this)">5. Construct Facilities</button>
+      <button class="nav-tab" data-pane="hydroponics" onclick="selectPane('hydroponics', this)">3. Hydroponics</button>
+      <button class="nav-tab" data-pane="actions" onclick="selectPane('actions', this)">4. Actions</button>
+      <button class="nav-tab" data-pane="crew" onclick="selectPane('crew', this)">5. Crew Roster</button>
       <button class="nav-tab" data-pane="field" onclick="selectPane('field', this)">6. Field Ops &amp; Launches <span class="lock-tag" id="fieldLockTag">[PHASE II]</span></button>
       <button class="nav-tab" data-pane="risks" onclick="selectPane('risks', this)">7. Possible Risks</button>
     </nav>
@@ -1815,32 +2458,6 @@ HTML_PAGE = """<!DOCTYPE html>
     <!-- PANE 1: LIFE SUPPORT & STOCKPILE -->
     <section class="view-pane active" id="pane-ops">
       <div class="grid-vitals" id="vitalsGrid"></div>
-
-      <div class="panel" id="panelDirectOps" style="margin-top:8px;">
-        <div class="panel-header">
-          <span class="panel-title">Direct Life-Support &amp; Colony Maintenance</span>
-          <span class="label-mono" id="readyCountLabel">0 Ready Crew</span>
-        </div>
-        <div id="opsWorkerNotice"></div>
-        <div class="ctrl-row">
-          <button onclick="sendAction('balance_atmosphere', [])">Balance Atmosphere (10 Water, 20 Power)</button>
-          <button onclick="sendAction('feed_crew', [])">Issue Extra Ration</button>
-          <button onclick="sendAction('maintain_buildings', [])">Maintain All Buildings (+4% Safety)</button>
-          <button onclick="sendAction('transfer_logistics', [])">Run Logistics Transfer</button>
-        </div>
-        <div class="ctrl-row">
-          <select id="selOpsWorker"></select>
-          <button id="btnMoxie" onclick="runWithWorker('run_moxie', 'selOpsWorker')">Run MOXIE (+O2)</button>
-          <select id="selCrop">
-            <option value="lettuce">Lettuce</option>
-            <option value="wheat">Wheat</option>
-            <option value="flax">Flax</option>
-            <option value="sunflower">Sunflower</option>
-          </select>
-          <button id="btnHydro" onclick="runWithWorkerCrop('hydroponics')">Grow Hydroponics</button>
-          <button id="btnRefineCrop" onclick="runWithWorkerCrop('food_refinery')">Refine Harvest</button>
-        </div>
-      </div>
 
       <div class="panel" style="margin-top:8px;">
         <div class="panel-header">
@@ -1854,7 +2471,11 @@ HTML_PAGE = """<!DOCTYPE html>
     <!-- PANE 2: BUILDINGS & STAFFING -->
     <section class="view-pane" id="pane-buildings">
       <div class="notice-strip">
-        <strong>Buildings Menu:</strong> Click <strong>See Workers &amp; Put to Work</strong> on any building to inspect its staff and assign eligible specialists. Auto-staff fills each building's minimum profession requirements.
+        <strong>Buildings Menu:</strong> Click <strong>See Workers &amp; Put to Work</strong> on any building to inspect its staff and assign eligible specialists or universal Robots. Construction blueprints arrive as random daily directives.
+      </div>
+      <div class="panel-header" style="margin:8px 0;">
+        <span class="panel-title" id="buildingsContextLabel">MISSION FACILITIES</span>
+        <span class="label-mono">Facility status and staffing reflect the selected mission site.</span>
       </div>
       <div class="panel" style="margin-bottom:8px;">
         <div class="panel-header">
@@ -1866,14 +2487,21 @@ HTML_PAGE = """<!DOCTYPE html>
       <div class="grid-2col" id="buildingsGrid"></div>
     </section>
 
-    <!-- PANE 3: ACTIONS MENU (5 SET + 5 RANDOM DAILY ACTIONS) -->
+    <!-- PANE 3: HYDROPONICS -->
+    <section class="view-pane" id="pane-hydroponics">
+      <div class="notice-strip"><strong>Houston:</strong> Crop production rotates through lettuce, wheat, flax, and sunflower. Each attempt advances the rotation so a shortage cannot stall it.</div>
+      <div id="hydroponicsPanel"></div>
+    </section>
+
+    <!-- PANE 4: ACTIONS MENU -->
     <section class="view-pane" id="pane-actions">
       <div class="panel" style="margin-bottom:8px;">
         <div class="panel-header">
           <span class="panel-title" id="actionsHeaderTitle">DAILY COLONY ACTIONS &mdash; SOL 1</span>
           <div class="btn-group">
-            <span class="status-pill op" id="setActionsCounter">5 SET ACTIONS</span>
+            <span class="status-pill op" id="setActionsCounter">14 SET ACTIONS</span>
             <span class="status-pill role" id="rndActionsCounter">5 RANDOM ACTIONS</span>
+            <button class="btn-mars" onclick="sendAction('take_all_actions', [])">Run All Available Actions</button>
           </div>
         </div>
         <div class="label-mono">Choose an available Set Action or Random Daily Directive. Most actions are limited to once per Sol; actions tied to a building scale with the number of matching buildings. Action limits reset each Sol.</div>
@@ -1887,7 +2515,7 @@ HTML_PAGE = """<!DOCTYPE html>
 
       <div class="panel" style="margin-bottom:8px;">
         <div class="panel-header">
-          <span class="panel-title">STANDARD DAILY SET ACTIONS (5)</span>
+          <span class="panel-title">STANDARD DAILY SET ACTIONS</span>
           <span class="label-mono">Available Every Sol</span>
         </div>
         <div class="grid-2col" id="setActionsGrid"></div>
@@ -1905,40 +2533,36 @@ HTML_PAGE = """<!DOCTYPE html>
     <!-- PANE 4: CREW ROSTER -->
     <section class="view-pane" id="pane-crew">
       <div class="notice-strip">
-        <strong>Permanent Crew Specialties:</strong> Each astronaut is locked to their trained mission role (Doctor, Engineer, Biologist, Geologist, or Pilot). Unstaffed crew can rest to heal, study to boost role skill, or visit the hospital.
+        <strong>Crew Operations:</strong> Crew can change specialties and be reassigned; workers taken off a job become available after one Sol.
+      </div>
+      <div class="panel" style="margin-bottom:8px;">
+        <div class="panel-header">
+          <span class="panel-title">Robot Factory — Available at Mission Start</span>
+          <span class="status-pill op">PHASE I</span>
+        </div>
+        <div class="label-mono">Fabricate one robot for 30 aluminum, 20 steel, and 40 electricity. A ready specialist operates the factory.</div>
+        <div class="ctrl-row">
+          <select id="selRobotFactoryWorker"></select>
+          <button class="btn-primary" id="btnFabricateRobot" onclick="runWithWorker('fabricate_robot', 'selRobotFactoryWorker')">Fabricate Robot</button>
+        </div>
       </div>
       <div class="grid-2col" id="crewGrid"></div>
     </section>
 
-    <!-- PANE 5: CONSTRUCT FACILITIES -->
-    <section class="view-pane" id="pane-construct">
-      <div class="panel" style="margin-bottom:8px;">
-        <div class="panel-header">
-          <span class="panel-title">Colony Engineering Blueprints</span>
-          <span class="label-mono" id="phaseScheduleLabel"></span>
-        </div>
-        <div class="ctrl-row" style="margin-top:4px;">
-          <input type="text" id="filterInput" placeholder="Search blueprint (e.g. food, power, lab, rover, farm)..." oninput="renderCatalog()" style="min-width:280px;" />
-          <label class="label-mono" style="display:flex;align-items:center;gap:5px;cursor:pointer;">
-            <input type="checkbox" id="showLockedChk" checked onchange="renderCatalog()" /> Show upcoming phase blueprints
-          </label>
-        </div>
-      </div>
-      <div class="grid-2col" id="catalogGrid"></div>
-    </section>
-
-    <!-- PANE 6: FIELD OPS & LAUNCHES -->
+    <!-- PANE 5: FIELD OPS & LAUNCHES -->
     <section class="view-pane" id="pane-field">
       <div id="fieldLockedBanner"></div>
       <div id="fieldWorkerNotice"></div>
       <div id="rocketOpsPanel" style="margin-bottom:8px;"></div>
+      <div id="evaOpsPanel" style="margin-bottom:8px;"></div>
       <div class="grid-2col" id="fieldGrid"></div>
+      <div class="panel" id="earthCommsPanel" style="margin-top:8px;"></div>
     </section>
 
-    <!-- PANE 7: POSSIBLE RISKS -->
+    <!-- PANE 6: POSSIBLE RISKS -->
     <section class="view-pane" id="pane-risks">
       <div class="notice-strip">
-        Each listed hazard is rolled independently once per Sol. Multiple distinct hazards can occur on the same Sol; active hazard types do not re-trigger until resolved.
+        Each listed hazard can occur independently once per Sol. Hazards are filtered by station location; active hazard types do not re-trigger until resolved.
       </div>
       <div class="grid-2col" id="risksGrid"></div>
     </section>
@@ -1955,12 +2579,28 @@ HTML_PAGE = """<!DOCTYPE html>
 </div>
 
 <div class="toast-msg" id="toastBox"></div>
+<div class="panel maintenance-dock" id="maintenanceTargetsPanel">
+  <div class="panel-header">
+    <span class="panel-title">Maintenance Targets</span>
+    <span class="label-mono" id="maintenanceTargetsStatus"></span>
+  </div>
+  <div class="label-mono" id="maintenanceTargetsBuilding"></div>
+  <div class="ctrl-row">
+    <select id="maintenanceTargetSelector" multiple size="3" aria-label="Buildings assigned to maintenance"></select>
+    <button onclick="saveMaintenanceTargets()">Save List (max 10)</button>
+    <button onclick="sendAction('maintain_buildings', [])">Maintain Now</button>
+    <button onclick="selectMaintenanceBuilding(null)">Close</button>
+  </div>
+</div>
 
 <!-- ==================== MISSION CONFIGURATION MODAL ==================== -->
 <div class="modal-wrap" id="setupModal">
   <div class="modal-box setup-modal-box">
     <h2>Mission Configuration &mdash; Daedalus Team</h2>
     <div class="label-mono">Select the destination, crew manifest, starting stockpiles, and mission parameters.</div>
+    <div class="notice-strip" style="margin-top:8px;" id="nextMissionGuide">
+      <strong>Next mission quick-start:</strong> 1) Choose a destination. 2) Select human crew and optional universal robots. 3) Check starting resources and facilities. 4) Set difficulty and mission targets, then authorize the mission. Keep food, water, oxygen, and power above emergency levels.
+    </div>
     <div class="env-options" id="envOptionsGrid"></div>
     <section class="setup-section">
       <div class="panel-header">
@@ -1987,9 +2627,23 @@ HTML_PAGE = """<!DOCTYPE html>
       </div>
     </section>
     <section class="setup-section">
+      <div class="panel-title">Mission Difficulty</div>
+      <div class="label-mono">Difficulty adjusts action availability and the resource cost of economic actions and upkeep. New games start on Easy.</div>
+      <div class="ctrl-row">
+        <select id="inDifficulty" aria-label="Mission difficulty"></select>
+        <span class="label-mono" id="difficultySummary"></span>
+      </div>
+    </section>
+    <section class="setup-section">
       <div class="panel-title">Starting Resources</div>
       <div class="label-mono">Set the amount of each stockpile brought on the mission (0 to its storage capacity).</div>
       <div class="resource-slider-grid" id="startingResources"></div>
+    </section>
+    <section class="setup-section">
+      <div class="panel-title">Additional Starting Buildings</div>
+      <div class="label-mono">Choose up to 15 free buildings to add to your starting base. Solar power, an RTG, and the Robot Factory are already included.</div>
+      <div class="resource-slider-grid" id="startingBuildings"></div>
+      <div class="label-mono" id="startingBuildingsSummary" aria-live="polite"></div>
     </section>
     <div class="ctrl-row" style="margin-top:10px;">
       <label class="label-mono">Target Sols: <input type="number" id="inSols" min="10" max="365" value="30" style="width:72px;" /></label>
@@ -2016,38 +2670,59 @@ HTML_PAGE = """<!DOCTYPE html>
     </div>
     <div class="label-mono">NASA Space Apps Challenge 2026 | Daedalus Team (Bogot&aacute;, Colombia)</div>
 
-    <div class="manual-section">
-      <h3>1. MISSION OBJECTIVE &amp; VICTORY RULES</h3>
-      <p style="margin:4px 0;">Survive the target mission duration (default <strong>30 Sols</strong>) and accumulate the target <strong>Science Points</strong> (default <strong>500</strong>). If all active crew members reach 0 HP, the mission ends immediately.</p>
-    </div>
+    <details class="manual-section">
+      <summary>1. MISSION OBJECTIVE &amp; VICTORY RULES</summary>
+      <p style="margin:4px 0;">Survive the target mission duration (default <strong>30 Sols</strong>) and accumulate the target <strong>Science Points</strong> (default <strong>500</strong>). Mission failure from casualties occurs only when all human colonists have died and all robots are inactive.</p>
+    </details>
 
-    <div class="manual-section">
-      <h3>2. DAILY ACTIONS MENU</h3>
-      <p style="margin:4px 0;">Each Sol provides core Set Actions and random daily directives tailored to your clearance phase. Most actions can be used once per Sol; building-based actions are limited by the number of matching buildings. Random directives can be refreshed once per Sol.</p>
-    </div>
+    <details class="manual-section">
+      <summary>2. DAILY ACTIONS MENU</summary>
+      <p style="margin:4px 0;">Each Sol provides core Set Actions and random daily directives tailored to your clearance phase. Construction blueprints appear among the random directives and require one ready worker of any profession. Use <strong>Run All Available Actions</strong> to attempt each unused action once. Random directives can be refreshed once per Sol. <strong>Process Plants</strong> handles all affordable harvested crop batches in one action.</p>
+    </details>
 
-    <div class="manual-section">
-      <h3>3. PERMANENT CREW SPECIALTIES</h3>
+    <details class="manual-section">
+      <summary>3. PERMANENT CREW SPECIALTIES</summary>
       <table class="manual-table">
         <tr><th>Role</th><th>Assigned Buildings</th><th>Field Bonus &amp; Crisis Duty</th></tr>
         <tr><td><strong>Doctor</strong></td><td>Habitation Dome, Medical Bay, Hospital, Recreation</td><td>Seals Ammonia Coolant Leaks &amp; restores crew health.</td></tr>
-        <tr><td><strong>Engineer</strong></td><td>Power Plant, MOXIE, Steel Mill, Fuel Refinery, Lab</td><td>1.5x yield on MOXIE, Fuel Synthesis &amp; Refining; fixes Grid Overloads.</td></tr>
-        <tr><td><strong>Biologist</strong></td><td>Food Factory, Crop Farms, Canteen, Research Lab</td><td>1.5x yield on Hydroponics &amp; Food Refinery.</td></tr>
+        <tr><td><strong>Engineer</strong></td><td>Maintenance Service Building, Steel Mill, Fuel Refinery, Lab</td><td>1.5x yield on Fuel Synthesis &amp; Refining; fixes Grid Overloads.</td></tr>
+        <tr><td><strong>Biologist</strong></td><td>Food Factory, Crop Farms, Canteen, Research Lab</td><td>1.5x yield on Hydroponics &amp; plant processing.</td></tr>
         <tr><td><strong>Geologist</strong></td><td>Water Extractor, Ice Mine, Aluminum Mine</td><td>1.5x yield on Surface Mining &amp; Rover Expeditions; patches Hull Breaches.</td></tr>
         <tr><td><strong>Pilot</strong></td><td>Logistics Hub, Comms Hub, Satellite Dish</td><td>Transfers local building buffers to colony stock; 1.5x Science on Launches.</td></tr>
+        <tr><td><strong>Robot</strong></td><td>Every facility and worker action</td><td>Universal worker that can fill any profession requirement or perform any role's tasks.</td></tr>
       </table>
-    </div>
+    </details>
 
-    <div class="manual-section">
-      <h3>4. PROGRESSIVE CLEARANCE UNLOCKS</h3>
+    <details class="manual-section">
+      <summary>4. PROGRESSIVE CLEARANCE UNLOCKS</summary>
       <table class="manual-table">
         <tr><th>Phase</th><th>Unlock Condition</th><th>Capabilities Unlocked</th></tr>
-        <tr><td>Phase I</td><td>Sol 1 (Landing)</td><td>Life Support (MOXIE, Hydroponics, Atmosphere), Building Staffing, Daily Actions, Crew Roster, Basic Construction.</td></tr>
+        <tr><td>Phase I</td><td>Sol 1 (Landing)</td><td>Life Support, Building Staffing, Daily Actions, Crew Roster, and the first construction directives.</td></tr>
         <tr><td>Phase II</td><td>Sol 3 or 40 Science</td><td>Regolith &amp; Ice Mining, Sabatier Fuel Synthesis, Material Refining, Rover &amp; Drone Recon.</td></tr>
         <tr><td>Phase III</td><td>Sol 6 or 120 Science</td><td>Research Lab Point Synthesis, Communications Hub &amp; Satellite Dish.</td></tr>
         <tr><td>Phase IV</td><td>Sol 10 or 250 Science</td><td>Spacecraft &amp; Vehicle Manufacturing and Orbital Satellite / Rocket Launches.</td></tr>
       </table>
-    </div>
+    </details>
+
+    <details class="manual-section">
+      <summary>5. EARTH MESSAGES &amp; SIDE QUESTS</summary>
+      <p style="margin:4px 0;">An active satellite is required to send messages to Earth. Solar flares block all communication for at least three Sols; other communication incidents also replace Houston's reports with an outage notice. Transmit once per Sol to request a side quest. Accept it, complete its tracked objective, then transmit completion to earn research and an early building blueprint.</p>
+    </details>
+
+    <details class="manual-section">
+      <summary>6. STARTING FACILITIES &amp; ROCKETS</summary>
+      <p style="margin:4px 0;">Mission settings let you add up to 15 free starting buildings (up to five of each type); the solar generator, backup RTG, Service Building, mines, Hydroponics Bays, and Robot Factory are already included. Resupply rockets are free to launch but take a long, position-dependent transit. Track each flight's travel and payload-mass bars in Field Ops.</p>
+    </details>
+
+    <details class="manual-section">
+      <summary>7. DIFFICULTY, STAFFING &amp; HYDROPONICS</summary>
+      <p style="margin:4px 0;">Easy is the default for a new game and reduces resource costs while increasing action allowances. Normal uses standard values; Hard raises costs and lowers action limits. A crop rotation action grows the next crop in the lettuce, wheat, flax, and sunflower cycle, while farm settings choose a bay's crop or seed output. Operational buildings produce automatically at Sol end. Workers unstaffed from buildings become available after one Sol.</p>
+    </details>
+
+    <details class="manual-section">
+      <summary>8. MAINTENANCE, EVA SUITS &amp; HOUSTON</summary>
+      <p style="margin:4px 0;">In Buildings &amp; Staffing, select <strong>Manage Maintenance Targets</strong> on a Service Building to open its assignment menu. Each Service Building can maintain up to 10 facilities; maintenance repairs condition and boosts staffed production. Resource panels warn when negative net flow predicts exhaustion within 1, 5, or 10 Sols; depletion opens an emergency conservation panel. Creating an EVA suit uses 8 aluminum, 6 plastic, 3 glass, 4 flax, and 12 power. Use a car, drone, and four ready suits for randomized team exploration. Low-health buildings become dangerous and can injure staff.</p>
+    </details>
   </div>
 </div>
 
@@ -2057,6 +2732,9 @@ HTML_PAGE = """<!DOCTYPE html>
     <h2 id="repTitle">POST-MISSION ANALYSIS</h2>
     <p id="repReason" style="margin:6px 0 12px 0;"></p>
     <div class="panel" id="repMetrics" style="margin-bottom:12px;"></div>
+    <div class="notice-strip" style="margin-bottom:12px;">
+      <strong>Next mission quick tutorial:</strong> Choose a destination, then balance crew and robots with starting resources. Keep life-support stocks above 20%; add only facilities you can power and staff. Advance one Sol, review warnings, then use daily actions and maintenance to stabilize before expanding.
+    </div>
     <div class="ctrl-row" style="justify-content:flex-end;">
       <button class="btn-mars" onclick="closeReportModal(); openSetupModal();">Configure Next Mission</button>
     </div>
@@ -2064,18 +2742,46 @@ HTML_PAGE = """<!DOCTYPE html>
 </div>
 
 <script>
+// Browser-side state mirrors the latest server snapshot and tracks temporary UI state.
 let STATE = null;
 let chosenEnv = 'mars';
 let reportShownSol = null;
 let tutorialIdx = -1;
 let activeBuildingModalIdx = null;
+let selectedMaintenanceBuildingIdx = null;
 let SETUP_OPTIONS = null;
 let rocketPayload = { water: 200, food: 50000 };
+// Form selections persist while setup is open; popup queues preserve event order.
 let selectedHumanIds = new Set();
 let selectedRobotIds = new Set();
 let manualHumanIds = new Set();
 let manualRobotIds = new Set();
+let selectedStartingBuildings = null;
+let crisisPopupQueue = [];
+let depletionPopupQueue = [];
+let firstRunSlide = 0;
 
+// Copy for the initial flight briefing shown after entering a mission.
+const FIRST_RUN_SLIDES = [
+  {
+    title: 'Mission Control Briefing',
+    body: 'You are the flight director of the Daedalus mission. Keep the colonists alive, stabilize the outpost, and build the research capability needed to make the mission sustainable.'
+  },
+  {
+    title: 'The Colony Is a Closed System',
+    body: 'Food, water, oxygen, power, and materials are finite. Buildings consume resources even while idle, workers have specialties, and hazards can interrupt operations. Check the vitals and net-per-Sol readings for the selected mission site before committing to a plan.'
+  },
+  {
+    title: 'Your Mission Objectives',
+    body: 'Survive the configured number of Sols and meet the science target. Expand through construction directives, use hydroponics and field operations to balance supplies, and launch satellites to improve research and maintain a link with Earth.'
+  },
+  {
+    title: 'Houston Is on the Loop',
+    body: 'Houston Mission Control will guide your first steps, explain newly triggered crises, and report Earth and colony conditions at the end of each Sol. Mission difficulty and objectives are selected in Mission Settings.'
+  }
+];
+
+// Ordered steps for the interactive tour; each step targets a pane or UI element.
 const TUTORIAL_FLOW = [
   {
     title: 'Step 1: Monitor Your 4 Core Life-Support Vitals',
@@ -2096,8 +2802,8 @@ const TUTORIAL_FLOW = [
     spotSelector: '#buildingsGrid .panel:last-child .btn-primary'
   },
   {
-    title: 'Step 4: Open the New "3. Actions" Menu',
-    desc: 'Click the highlighted "3. Actions" tab to view the Set Actions and Random Daily Directives available this Sol.',
+    title: 'Step 4: Open the "4. Actions" Menu',
+    desc: 'Click the highlighted "4. Actions" tab to view the Set Actions and Random Daily Directives available this Sol.',
     pane: 'buildings',
     spotSelector: '.nav-tab[data-pane="actions"]'
   },
@@ -2108,34 +2814,80 @@ const TUTORIAL_FLOW = [
     spotId: 'setActionsGrid'
   },
   {
-    title: 'Step 6: Advance 1 Sol (Simulate 24 Hours)',
+    title: 'Step 6: Advance 1 Sol (Simulate 24.5 Hours)',
     desc: 'Click "Advance 1 Sol" in the top bar. Automated buildings will produce resources, daily actions will refresh, and you will see your Net Balance per Sol.',
     pane: 'actions',
     spotId: 'btnAdvance1'
   },
   {
-    title: 'Step 7: Expand & Unlock New Phases',
-    desc: 'Open "5. Construct Facilities" to build another Food Factory or Power Plant, and reach Sol 3 to unlock Phase II Mining & Rovers!',
-    pane: 'ops',
-    spotSelector: '.nav-tab[data-pane="construct"]'
+    title: 'Step 7: Understand Hydroponics',
+    desc: 'Hydroponics grows rotating crops; each Sol the colony automatically produces from operational buildings. Choose a farm output here and use the Hydroponics action to grow the next crop.',
+    pane: 'hydroponics',
+    spotId: 'hydroponicsPanel'
+  },
+  {
+    title: 'Step 8: Expand Through Random Directives',
+    desc: 'Construction blueprints appear among the random daily directives. Pick a ready worker of any profession to build, and advance Sols to unlock more blueprints.',
+    pane: 'actions',
+    spotId: 'randomActionsGrid'
   }
 ];
 
+// Leave the title screen and begin the initial mission briefing.
 function beginMissionFlow() {
   document.getElementById('movieIntro').classList.add('hidden');
-  openCrewIntro();
+  renderConsole();
+  showFirstRunBriefing();
 }
 
+// Reset and display the first briefing slide, tailored to the chosen destination.
+function showFirstRunBriefing() {
+  firstRunSlide = 0;
+  const site = STATE ? STATE.space_label : 'the selected mission site';
+  FIRST_RUN_SLIDES[0].title = `Mission Control Briefing — ${site}`;
+  renderFirstRunSlide();
+  document.getElementById('firstRunModal').classList.add('open');
+}
+
+// Refresh briefing text, progress, and navigation controls for the active slide.
+function renderFirstRunSlide() {
+  const slide = FIRST_RUN_SLIDES[firstRunSlide];
+  document.getElementById('firstRunTitle').textContent = slide.title;
+  document.getElementById('firstRunBody').textContent =
+    firstRunSlide === 2
+      ? `${slide.body} Current destination: ${STATE ? STATE.space_label : 'mission site'}.`
+      : slide.body;
+  document.getElementById('firstRunCounter').textContent =
+    `BRIEFING ${firstRunSlide + 1}/${FIRST_RUN_SLIDES.length}`;
+  document.getElementById('firstRunBack').disabled = firstRunSlide === 0;
+  document.getElementById('firstRunNext').textContent =
+    firstRunSlide === FIRST_RUN_SLIDES.length - 1 ? 'Begin Mission' : 'Continue';
+}
+
+// Move through briefing slides or continue into the crew introduction.
+function moveFirstRunSlide(direction) {
+  if (direction > 0 && firstRunSlide === FIRST_RUN_SLIDES.length - 1) {
+    document.getElementById('firstRunModal').classList.remove('open');
+    openCrewIntro();
+    return;
+  }
+  firstRunSlide = Math.max(0, Math.min(FIRST_RUN_SLIDES.length - 1, firstRunSlide + direction));
+  renderFirstRunSlide();
+}
+
+// Populate and open the crew introduction modal.
 function openCrewIntro() {
   renderCrewIntro();
   document.getElementById('crewIntroModal').classList.add('open');
 }
 
+// Close crew introduction and optionally launch the interactive tutorial.
 function closeCrewIntro(withTutorial) {
   document.getElementById('crewIntroModal').classList.remove('open');
   if (withTutorial) startTutorial();
 }
 
+// Show each human and robot's role, specialty bonus, and initial assignment.
 function renderCrewIntro() {
   if (!STATE) return;
   document.getElementById('crewIntroEnv').textContent = STATE.space_label.toUpperCase();
@@ -2157,6 +2909,7 @@ function renderCrewIntro() {
   `).join('');
 }
 
+// Open the staffing editor for the selected building.
 function openBuildingWorkersModal(bIdx) {
   activeBuildingModalIdx = bIdx;
   renderBuildingWorkersModal();
@@ -2164,11 +2917,13 @@ function openBuildingWorkersModal(bIdx) {
   onTutorialEvent('OPEN_BLD_WORKERS');
 }
 
+// Close the staffing editor and clear its selected building.
 function closeBuildingWorkersModal() {
   activeBuildingModalIdx = null;
   document.getElementById('bldWorkersModal').classList.remove('open');
 }
 
+// List current staff and eligible candidates with assign, unstaff, and reassign actions.
 function renderBuildingWorkersModal() {
   if (activeBuildingModalIdx === null || !STATE) return;
   const b = STATE.buildings[activeBuildingModalIdx];
@@ -2200,7 +2955,7 @@ function renderBuildingWorkersModal() {
   }
 
   const eligibleWorkers = STATE.workers.filter(w =>
-    allowedProfs.includes(w.profession) &&
+    (allowedProfs.includes(w.profession) || w.is_robot) &&
     !w.retired &&
     w.health > 0 &&
     w.powered_on &&
@@ -2220,7 +2975,7 @@ function renderBuildingWorkersModal() {
     } else if (w.available) {
       actionBtn = `<button class="btn-ok" onclick="sendAction('staff_building', [${b.index}, ${w.index}])">Put to Work</button>`;
     } else if (w.assigned_building) {
-      actionBtn = `<button class="btn-primary" onclick="sendAction('reassign_building_worker', [${b.index}, ${w.index}])">Reassign &amp; Put to Work</button>`;
+      actionBtn = `      <button class="btn-primary" onclick="sendAction('reassign_building_worker', [${b.index}, ${w.index}])">Unstaff (available next Sol)</button>`;
     } else {
       actionBtn = `<span class="status-pill idle">${w.status}</span>`;
     }
@@ -2238,13 +2993,15 @@ function renderBuildingWorkersModal() {
       </div>
     `;
   }).join('')
-    : `<div class="notice-strip">No active specialists with a required profession are eligible to staff this building.</div>`;
+    : `<div class="notice-strip">No available eligible specialist or universal Robot can staff this building.</div>`;
 }
 
+// Remove tutorial highlighting before selecting another target.
 function clearSpotlights() {
   document.querySelectorAll('.tutorial-spotlight').forEach(el => el.classList.remove('tutorial-spotlight'));
 }
 
+// Highlight and scroll to the interface element named by a tutorial step.
 function applySpotlight(step) {
   clearSpotlights();
   if (!step) return;
@@ -2256,6 +3013,7 @@ function applySpotlight(step) {
   }
 }
 
+// Start the tutorial from its first step and switch to the opening pane.
 function startTutorial() {
   tutorialIdx = 0;
   const tabBtn = document.querySelector('.nav-tab[data-pane="ops"]');
@@ -2263,12 +3021,14 @@ function startTutorial() {
   renderTutorial();
 }
 
+// End the tutorial and remove its banner and spotlight.
 function stopTutorial() {
   tutorialIdx = -1;
   clearSpotlights();
   document.getElementById('guidedBanner').classList.remove('visible');
 }
 
+// Advance the guided walkthrough or show its completion message.
 function nextTutorialStep() {
   if (tutorialIdx < TUTORIAL_FLOW.length - 1) {
     tutorialIdx++;
@@ -2282,6 +3042,7 @@ function nextTutorialStep() {
   }
 }
 
+// Advance the walkthrough when the player completes a relevant interface action.
 function onTutorialEvent(evt) {
   if (tutorialIdx < 0) return;
   if (tutorialIdx === 1 && evt === 'OPEN_BUILDINGS') {
@@ -2298,10 +3059,13 @@ function onTutorialEvent(evt) {
     renderTutorial();
   } else if (tutorialIdx === 5 && ['advance_sol', 'advance_sols'].includes(evt)) {
     tutorialIdx = 6;
+    const tabBtn = document.querySelector(`.nav-tab[data-pane="${TUTORIAL_FLOW[tutorialIdx].pane}"]`);
+    if (tabBtn) selectPane(TUTORIAL_FLOW[tutorialIdx].pane, tabBtn, true);
     renderTutorial();
   }
 }
 
+// Display the current tutorial instruction and schedule its target highlight.
 function renderTutorial() {
   const banner = document.getElementById('guidedBanner');
   if (tutorialIdx < 0 || tutorialIdx >= TUTORIAL_FLOW.length) {
@@ -2313,11 +3077,12 @@ function renderTutorial() {
   banner.classList.add('visible');
   document.getElementById('tutStepTag').textContent = `STEP ${tutorialIdx + 1} OF ${TUTORIAL_FLOW.length}`;
   document.getElementById('tutStepTitle').textContent = step.title;
-  document.getElementById('tutStepDesc').textContent = step.desc;
+  document.getElementById('tutStepDesc').textContent = `Houston: ${step.desc}`;
   document.getElementById('tutActionBtn').textContent = tutorialIdx === TUTORIAL_FLOW.length - 1 ? 'Finish Tutorial' : 'Next Step \u2192';
   setTimeout(() => applySpotlight(step), 60);
 }
 
+// Display a short success or error notification.
 function toast(msg, isErr = false) {
   const el = document.getElementById('toastBox');
   el.textContent = msg;
@@ -2327,13 +3092,25 @@ function toast(msg, isErr = false) {
   window._tTimer = setTimeout(() => { el.style.display = 'none'; }, 4000);
 }
 
+// Escape dynamic text before inserting it into HTML templates.
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, char => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[char]);
+}
+
+// Fetch the current mission snapshot when the browser client starts.
 async function loadState() {
   const res = await fetch('/api/state');
+  if (!res.ok) throw new Error(`State request failed (${res.status}).`);
   STATE = await res.json();
   renderConsole();
 }
 
+// Send a game action, refresh the screen, and queue any new incident popups.
 async function sendAction(action, args = [], cardId = null) {
+  const previousEventCount = STATE?.crisis_events?.length || 0;
+  const previousDepletionCount = STATE?.resource_depletion_events?.length || 0;
   const res = await fetch('/api/action', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -2341,8 +3118,20 @@ async function sendAction(action, args = [], cardId = null) {
   });
   const data = await res.json();
   STATE = data.state;
+  if (STATE.crisis_events.length >= previousEventCount) {
+    crisisPopupQueue.push(...STATE.crisis_events.slice(previousEventCount));
+  } else {
+    crisisPopupQueue = [];
+  }
+  if (STATE.resource_depletion_events.length >= previousDepletionCount) {
+    depletionPopupQueue.push(...STATE.resource_depletion_events.slice(previousDepletionCount));
+  } else {
+    depletionPopupQueue = [];
+  }
   toast(data.message, !data.ok);
   renderConsole();
+  showNextCrisisPopup();
+  showNextDepletionPopup();
   if (activeBuildingModalIdx !== null) renderBuildingWorkersModal();
   if (data.ok) {
     if (cardId) onTutorialEvent('DAILY_ACTION_ACTIVATED');
@@ -2350,6 +3139,69 @@ async function sendAction(action, args = [], cardId = null) {
   }
 }
 
+// Display the next queued crisis after any earlier crisis has been dismissed.
+function showNextCrisisPopup() {
+  const modal = document.getElementById('crisisPopup');
+  if (modal.classList.contains('open') || crisisPopupQueue.length === 0) return;
+  const incident = crisisPopupQueue.shift();
+  document.getElementById('crisisPopupTitle').textContent = incident.name;
+  document.getElementById('crisisPopupSeverity').textContent = `SEVERITY ${incident.severity}`;
+  document.getElementById('crisisPopupCause').textContent =
+    `${incident.cause || 'Cause not recorded.'} (Detected on Sol ${incident.sol || STATE.sol}.)`;
+  document.getElementById('crisisPopupDescription').textContent = incident.description;
+  modal.classList.add('open');
+}
+
+// Dismiss the current crisis and continue through incident/emergency queues.
+function closeCrisisPopup() {
+  document.getElementById('crisisPopup').classList.remove('open');
+  setTimeout(() => {
+    showNextCrisisPopup();
+    showNextDepletionPopup();
+  }, 150);
+}
+
+// Offer shutdown and robot-scrapping choices for an exhausted resource.
+function showNextDepletionPopup() {
+  const modal = document.getElementById('depletionPopup');
+  if (document.getElementById('crisisPopup').classList.contains('open') ||
+      modal.classList.contains('open') || depletionPopupQueue.length === 0) return;
+  const event = depletionPopupQueue.shift();
+  const label = STATE.resource_labels[event.resource] || event.resource;
+  document.getElementById('depletionPopupTitle').textContent = `${label} exhausted on Sol ${event.sol}`;
+  document.getElementById('depletionPopupSummary').textContent =
+    `The colony has no ${label} remaining. Close facilities that consume it or scrap robots to reduce future upkeep.`;
+  const candidates = STATE.buildings.filter(building =>
+    building.is_on && Number(building.operating_costs[event.resource] || 0) > 0
+  );
+  const buildingActions = candidates.map(building => `
+    <button onclick="respondToDepletion('toggle_building', ${building.index})">
+      Close ${escapeHtml(building.name)}
+    </button>`).join('');
+  const robotActions = STATE.workers.filter(worker => worker.is_robot && !worker.retired)
+    .map(worker => `
+      <button class="btn-warn" onclick="respondToDepletion('scrap_robot', ${worker.index})">
+        Scrap ${escapeHtml(worker.name)}
+      </button>`).join('');
+  const actionButtons = `${buildingActions}${robotActions}`;
+  document.getElementById('depletionPopupActions').innerHTML =
+    actionButtons || '<div class="label-mono">No eligible buildings or robots can be shut down.</div>';
+  modal.classList.add('open');
+}
+
+// Apply a chosen conservation response to a resource-depletion emergency.
+function respondToDepletion(action, index) {
+  document.getElementById('depletionPopup').classList.remove('open');
+  sendAction(action, [index]);
+}
+
+// Dismiss an emergency and show the next queued depletion notice if present.
+function closeDepletionPopup() {
+  document.getElementById('depletionPopup').classList.remove('open');
+  setTimeout(showNextDepletionPopup, 150);
+}
+
+// Execute a daily card, choosing a ready worker when its action requires one.
 function activateDailyCard(category, idx) {
   if (!STATE || !STATE.daily_actions) return;
   const list = category === 'set' ? STATE.daily_actions.set : STATE.daily_actions.random;
@@ -2383,6 +3235,7 @@ function activateDailyCard(category, idx) {
   }
 }
 
+// Free one assigned specialist when no worker is currently available.
 function quickUnstaffFirst() {
   if (!STATE) return;
   const staffedBld = STATE.buildings.find(b => b.assigned_workers && b.assigned_workers.length > 0);
@@ -2391,19 +3244,20 @@ function quickUnstaffFirst() {
   sendAction('unstaff_building', [staffedBld.index, w.index]);
 }
 
+// Run an action using the worker selected in the specified dropdown.
 function runWithWorker(action, selectId) {
   const idx = parseInt(document.getElementById(selectId).value, 10);
   if (isNaN(idx)) return toast('No Ready specialist available. Unstaff 1 specialist first.', true);
   sendAction(action, [idx]);
 }
 
-function runWithWorkerCrop(action) {
-  const idx = parseInt(document.getElementById('selOpsWorker').value, 10);
-  const crop = document.getElementById('selCrop').value;
-  if (isNaN(idx)) return toast('No Ready specialist available. Unstaff 1 specialist first.', true);
-  sendAction(action, [idx, crop]);
+// Submit a worker's selected profession change to the mission server.
+function changeWorkerSpecialty(workerIndex) {
+  const profession = Number(document.getElementById(`jobRole_${workerIndex}`).value);
+  sendAction('assign_job', [workerIndex, profession]);
 }
 
+// Run an action with both a selected worker and a selected option value.
 function runWithWorkerVal(action, wSelId, vSelId) {
   const idx = parseInt(document.getElementById(wSelId).value, 10);
   const val = document.getElementById(vSelId).value;
@@ -2411,6 +3265,7 @@ function runWithWorkerVal(action, wSelId, vSelId) {
   sendAction(action, [idx, val]);
 }
 
+// Switch workspace panes and notify the tutorial when relevant tabs are opened.
 function selectPane(name, btn, skipTutorialHook = false) {
   document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.view-pane').forEach(p => p.classList.remove('active'));
@@ -2423,6 +3278,7 @@ function selectPane(name, btn, skipTutorialHook = false) {
   if (tutorialIdx >= 0) setTimeout(() => applySpotlight(TUTORIAL_FLOW[tutorialIdx]), 60);
 }
 
+// Load mission setup choices and populate the configuration form.
 async function openSetupModal() {
   chosenEnv = STATE ? STATE.space_key : 'mars';
   renderEnvGrid();
@@ -2431,6 +3287,19 @@ async function openSetupModal() {
     const res = await fetch('/api/setup_options');
     if (!res.ok) throw new Error(`Setup options request failed (${res.status}).`);
     SETUP_OPTIONS = await res.json();
+    const difficultySelect = document.getElementById('inDifficulty');
+    difficultySelect.innerHTML = SETUP_OPTIONS.difficulties.map(profile =>
+      `<option value="${profile.key}">${escapeHtml(profile.label)}</option>`
+    ).join('');
+    difficultySelect.value = SETUP_OPTIONS.current_difficulty || 'easy';
+    difficultySelect.onchange = updateDifficultySummary;
+    updateDifficultySummary();
+    if (selectedStartingBuildings === null) {
+      selectedStartingBuildings = { ...SETUP_OPTIONS.current_starting_buildings };
+    } else {
+      SETUP_OPTIONS.current_starting_buildings = { ...selectedStartingBuildings };
+    }
+
     renderEnvGrid();
     document.getElementById('inCrew').value = SETUP_OPTIONS.current_human_candidate_ids.length;
     document.getElementById('inRobots').value = SETUP_OPTIONS.current_robot_candidate_ids.length;
@@ -2447,9 +3316,27 @@ async function openSetupModal() {
     toast(`Could not load mission setup options: ${error.message}`, true);
   }
 }
+
+// Explain how the selected difficulty changes costs and daily action limits.
+function updateDifficultySummary() {
+  if (!SETUP_OPTIONS) return;
+  const profile = SETUP_OPTIONS.difficulties.find(item =>
+    item.key === document.getElementById('inDifficulty').value
+  );
+  if (!profile) return;
+  const costPct = Math.round(profile.cost_multiplier * 100);
+  const actionPct = Math.round(profile.action_multiplier * 100);
+  document.getElementById('difficultySummary').textContent =
+    `${costPct}% resource cost · ${actionPct}% action limits`;
+}
+
+// Hide the mission setup dialog without changing the active mission.
 function closeSetupModal() { document.getElementById('setupModal').classList.remove('open'); }
+// Open the field manual.
 function openManual() { document.getElementById('manualModal').classList.add('open'); }
+// Close the field manual.
 function closeManual() { document.getElementById('manualModal').classList.remove('open'); }
+// Close the completed-mission report.
 function closeReportModal() { document.getElementById('reportModal').classList.remove('open'); }
 
 window.addEventListener('keydown', e => {
@@ -2457,6 +3344,7 @@ window.addEventListener('keydown', e => {
     closeManual();
     closeSetupModal();
     closeBuildingWorkersModal();
+    closeCrisisPopup();
   }
 
   if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
@@ -2530,6 +3418,7 @@ window.addEventListener('keydown', e => {
   if (next) next.button.focus();
 });
 
+// Render destination choices for the mission configuration screen.
 function renderEnvGrid() {
   if (!STATE) return;
   document.getElementById('envOptionsGrid').innerHTML = Object.entries(STATE.environments).map(([k, info]) => `
@@ -2540,6 +3429,7 @@ function renderEnvGrid() {
   `).join('');
 }
 
+// Fill setup controls for resources, buildings, crew, and mission objectives.
 function renderSetupOptions() {
   if (!SETUP_OPTIONS) return;
   for (const [kind, listId, selected] of [
@@ -2568,9 +3458,37 @@ function renderSetupOptions() {
       </label>
     `;
   }).join('');
+  document.getElementById('startingBuildings').innerHTML = SETUP_OPTIONS.starting_buildings.map(building => {
+    const count = SETUP_OPTIONS.current_starting_buildings[building.key] || 0;
+    return `
+      <label class="resource-slider-row label-mono" for="startBuilding_${building.key}">
+        <span>${escapeHtml(building.name)}</span>
+        <input type="number" id="startBuilding_${building.key}" min="0" max="5" step="1"
+          value="${count}" oninput="updateStartingBuildingSummary()" />
+      </label>
+    `;
+  }).join('');
+  updateStartingBuildingSummary();
   updateManifestSummary();
 }
 
+// Recount selected starting facilities and enforce the total configuration cap.
+function updateStartingBuildingSummary() {
+  if (!SETUP_OPTIONS) return;
+  const counts = Object.fromEntries(SETUP_OPTIONS.starting_buildings.map(building => [
+    building.key,
+    Number(document.getElementById(`startBuilding_${building.key}`)?.value || 0)
+  ]));
+  const total = Object.values(counts).reduce((sum, count) => sum + count, 0);
+  selectedStartingBuildings = Object.fromEntries(
+    Object.entries(counts).filter(([, count]) => Number.isInteger(count) && count > 0)
+  );
+  SETUP_OPTIONS.current_starting_buildings = { ...selectedStartingBuildings };
+  const summary = document.getElementById('startingBuildingsSummary');
+  summary.textContent = `Selected: ${total}/15 additional buildings.`;
+}
+
+// Add or remove one human or robot from the proposed mission roster.
 function toggleCandidate(kind, candidateId, checked) {
   const selected = kind === 'humans' ? selectedHumanIds : selectedRobotIds;
   const manual = kind === 'humans' ? manualHumanIds : manualRobotIds;
@@ -2590,6 +3508,7 @@ function toggleCandidate(kind, candidateId, checked) {
 let generatedHumanIds = new Set();
 let generatedRobotIds = new Set();
 
+// Update crew totals and keep profession/candidate selections synchronized.
 function updateManifestSummary() {
   const humanTarget = Number(document.getElementById('inCrew').value);
   const robotTarget = Number(document.getElementById('inRobots').value);
@@ -2602,6 +3521,7 @@ function updateManifestSummary() {
   document.getElementById('manifestSummary').textContent = `Selected manifest: ${humanText}, ${robotText}.`;
 }
 
+// Fill unselected crew slots with randomly chosen valid candidates.
 function generateRemainingCrew() {
   if (!SETUP_OPTIONS) return;
   const humanTarget = Number(document.getElementById('inCrew').value);
@@ -2641,6 +3561,7 @@ function generateRemainingCrew() {
   updateManifestSummary();
 }
 
+// Validate the setup form, create the mission, and enter its briefing.
 async function launchConfiguredMission() {
   if (!SETUP_OPTIONS) {
     toast('Mission setup options are still loading. Please try again.', true);
@@ -2664,6 +3585,16 @@ async function launchConfiguredMission() {
     resource.key,
     Number(document.getElementById(`startRes_${resource.key}`).value)
   ]));
+  const buildingCounts = SETUP_OPTIONS.starting_buildings.map(building => [
+    building.key,
+    Number(document.getElementById(`startBuilding_${building.key}`).value)
+  ]);
+  if (buildingCounts.some(([, count]) => !Number.isInteger(count) || count < 0 || count > 5) ||
+      buildingCounts.reduce((sum, [, count]) => sum + count, 0) > 15) {
+    toast('Starting buildings must be whole-number counts from 0 to 5, with at most 15 total.', true);
+    return;
+  }
+  const starting_buildings = Object.fromEntries(buildingCounts.filter(([, count]) => count > 0));
   const res = await fetch('/api/new_game', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -2675,7 +3606,9 @@ async function launchConfiguredMission() {
       unlock_all,
       human_candidate_ids: [...selectedHumanIds],
       robot_candidate_ids: [...selectedRobotIds],
-      starting_resources
+      starting_resources,
+      starting_buildings,
+      difficulty: document.getElementById('inDifficulty').value
     })
   });
   const response = await res.json();
@@ -2683,26 +3616,46 @@ async function launchConfiguredMission() {
     toast(response.message || `Mission setup failed (${res.status}).`, true);
     return;
   }
+  selectedStartingBuildings = { ...starting_buildings };
+  selectedMaintenanceBuildingIdx = null;
   STATE = response;
+  crisisPopupQueue = [];
+  depletionPopupQueue = [];
   reportShownSol = null;
   closeSetupModal();
   document.getElementById('movieIntro').classList.add('hidden');
   renderConsole();
-  openCrewIntro();
+  showFirstRunBriefing();
 }
 
+// Turn a resource-cost mapping into a compact label for the interface.
 function fmtCosts(obj) {
   const pairs = Object.entries(obj || {});
   return pairs.length ? pairs.map(([k, v]) => `${v} ${k}`).join(', ') : 'none';
 }
 
+// Refresh shared mission indicators, buildings, workers, actions, and all panes.
 function renderConsole() {
   if (!STATE) return;
   const u = STATE.unlocks;
 
+  const maintenanceDock = document.getElementById('maintenanceTargetsPanel');
+  if (maintenanceDock) {
+    const maintenanceBuilding = STATE.buildings.find(building =>
+      building.kind === 'Service' && building.index === selectedMaintenanceBuildingIdx
+    );
+    maintenanceDock.style.display =
+      document.getElementById('movieIntro').classList.contains('hidden') && maintenanceBuilding
+        ? 'block'
+        : 'none';
+    if (!maintenanceBuilding) selectedMaintenanceBuildingIdx = null;
+  }
   document.getElementById('envSubLabel').textContent = `${STATE.space_label} // Daedalus Team (Bogot\u00e1)`;
+  document.getElementById('buildingsContextLabel').textContent =
+    `${STATE.space_label.toUpperCase()} // COLONY FACILITIES`;
   document.getElementById('kpiSol').textContent = `${STATE.sol}/${STATE.target_sols}`;
   document.getElementById('kpiHrs').textContent = `${STATE.elapsed_hours}h`;
+  document.getElementById('kpiDifficulty').textContent = STATE.difficulty.toUpperCase();
   document.getElementById('kpiCrew').textContent = `${STATE.active_crew_count}/${STATE.total_crew_count}`;
   document.getElementById('kpiRobots').textContent = `${STATE.powered_robot_count}/${STATE.total_robot_count}`;
   document.getElementById('kpiVol').textContent = `${STATE.active_volume}m\u00b3`;
@@ -2744,22 +3697,24 @@ function renderConsole() {
   }).join('');
 
   const readyCrew = STATE.workers.filter(w => w.available);
-  document.getElementById('readyCountLabel').textContent = `${readyCrew.length} Ready Crew`;
   const workerNotice = readyCrew.length === 0
     ? `<div class="notice-strip" style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
          <span>All active specialists are currently staffed inside buildings. Free a specialist to run worker actions.</span>
          <button class="btn-primary" onclick="quickUnstaffFirst()">Unstaff 1 Specialist Now</button>
        </div>`
     : '';
-  document.getElementById('opsWorkerNotice').innerHTML = workerNotice;
   document.getElementById('actionsWorkerNotice').innerHTML = workerNotice;
   document.getElementById('fieldWorkerNotice').innerHTML = workerNotice;
 
   const wOptions = readyCrew.length
     ? readyCrew.map(w => `<option value="${w.index}">[${w.index}] ${w.name} (${w.profession}, HP ${w.health})</option>`).join('')
     : '<option value="">No Ready Specialists (Unstaff 1 first)</option>';
-  document.getElementById('selOpsWorker').innerHTML = wOptions;
   document.getElementById('selDailyActionWorker').innerHTML = wOptions;
+  document.getElementById('selRobotFactoryWorker').innerHTML = wOptions;
+  document.getElementById('btnFabricateRobot').disabled =
+    STATE.daily_action_usage.fabricate_robot.used >= STATE.daily_action_usage.fabricate_robot.limit;
+  document.getElementById('btnFabricateRobot').title =
+    `Fabricate robots: ${STATE.daily_action_usage.fabricate_robot.used}/${STATE.daily_action_usage.fabricate_robot.limit} actions this Sol`;
 
   const deltas = Object.entries(STATE.resources)
     .filter(([, r]) => r.net !== 0)
@@ -2767,10 +3722,12 @@ function renderConsole() {
   document.getElementById('solBalanceSummary').innerHTML = deltas.length ? deltas.join(' | ') : 'Awaiting Sol 1 completion';
 
   document.getElementById('stockGrid').innerHTML = Object.entries(STATE.resources)
-    .filter(([, r]) => r.max > 0 || r.current > 0)
     .map(([k, r]) => {
       const d = r.net !== 0 ? ` <span class="${r.net > 0 ? 'delta-pos' : 'delta-neg'}">(${r.net > 0 ? '+' : ''}${r.net})</span>` : '';
-      return `<div class="stock-cell"><span>${STATE.resource_labels[k] || k}${d}</span><strong>${r.current}/${r.max}</strong></div>`;
+      const warning = r.warning
+        ? `<div class="label-mono" style="color:${r.pct <= 0 || r.pct < 10 ? 'var(--danger-hi)' : '#fb923c'};">${r.warning}${r.depletion_eta_sols !== null && r.depletion_eta_sols > 0 && !r.warning.includes('within') ? ` · ${r.depletion_eta_sols} Sols to zero` : ''}</div>`
+        : '';
+      return `<div class="stock-cell"><span>${STATE.resource_labels[k] || k}${d}</span><strong>${r.current}/${r.max}</strong>${warning}</div>`;
     }).join('');
 
   // Buildings Menu with "See Workers & Put to Work" button on every building
@@ -2784,20 +3741,6 @@ function renderConsole() {
     ).join(' ');
 
     let extraHtml = '';
-    if (b.kind === 'Farm') {
-      const crops = ['lettuce', 'wheat', 'flax', 'sunflower'];
-      const farmUsage = STATE.daily_action_usage.configure_farm;
-      const farmAtLimit = farmUsage.used >= farmUsage.limit;
-      extraHtml += `
-        <div class="ctrl-row">
-          <select id="fCrop_${b.index}">${crops.map(c => `<option value="${c}" ${b.farm_crop === c ? 'selected' : ''}>${c}</option>`).join('')}</select>
-          <select id="fType_${b.index}">
-            <option value="crop" ${b.farm_product === 'crop' ? 'selected' : ''}>Crop</option>
-            <option value="seed" ${b.farm_product === 'seed' ? 'selected' : ''}>Seeds</option>
-          </select>
-          <button class="btn-primary" onclick="setFarm(${b.index})" ${farmAtLimit ? 'disabled' : ''}>${farmAtLimit ? 'Daily Limit Reached' : 'Set Output'}</button>
-        </div>`;
-    }
     if (b.kind === 'Research') {
       const lockedRes = !u.systems.research_academy;
       extraHtml += `
@@ -2809,6 +3752,10 @@ function renderConsole() {
           <button class="btn-primary" ${lockedRes ? 'disabled' : ''} onclick="runLab(${b.index})">${lockedRes ? 'Locked (Phase III)' : 'Synthesize Research'}</button>
         </div>`;
     }
+    const fillableRole = Object.keys(b.required_professions).some(role =>
+        readyCrew.some(worker => worker.profession === role || worker.is_robot)
+    );
+    const canFillSlots = b.workers_count < b.max_workers && fillableRole;
 
     return `
       <div class="panel">
@@ -2817,17 +3764,34 @@ function renderConsole() {
             <span class="panel-title">[${b.index}] ${b.name}</span>
             <span class="status-pill ${pillCls}">${pillTxt}</span>
           </div>
-          <div class="label-mono">${b.type} | Vol ${b.volume}m&sup3; | Safety ${b.safety}% | Staff ${b.workers_count}/${b.max_workers} (${reqs})</div>
+          <div class="label-mono">${b.type} | Vol ${b.volume}m&sup3; | Safety ${b.safety}% | Health ${b.health}% | Danger ${b.danger_rating}/3 | Staff ${b.workers_count}/${b.max_workers} (${reqs})</div>
           <div class="label-mono">Upkeep: ${fmtCosts(b.operating_costs)} (Standby: ${fmtCosts(b.standby_costs)})</div>
+          ${b.kind === 'Logistics' ? `<div class="label-mono">Daily transfer: ${b.transferred_today}/${b.transfer_limit} units</div>` : ''}
+          ${b.service_capacity ? `<div class="label-mono">Assigned maintenance: ${b.maintenance_targets.length}/${b.service_capacity} buildings — ${b.maintenance_targets.map(escapeHtml).join(', ') || 'none'}</div>` : ''}
           ${local ? `<div class="label-mono" style="color:#60a5fa;margin-top:3px;">Local Storage: ${local}</div>` : ''}
         </div>
         <div>
           <div class="ctrl-row">${badges || '<span class="label-mono">No workers assigned</span>'}</div>
           <div class="ctrl-row">
             <button class="btn-primary" onclick="openBuildingWorkersModal(${b.index})">See Workers &amp; Put to Work (${b.workers_count}/${b.max_workers})</button>
+            <button onclick="sendAction('staff_building_slots', [${b.index}])"
+              ${canFillSlots ? '' : 'disabled'}>Fill Open Worker Slots</button>
             <button onclick="sendAction('toggle_building', [${b.index}])" ${STATE.daily_action_usage.toggle_building.used >= STATE.daily_action_usage.toggle_building.limit ? 'disabled' : ''}>${b.is_on ? 'Turn Off' : 'Turn On'}</button>
           </div>
           ${extraHtml}
+          ${b.kind === 'Service' ? `
+            <div class="ctrl-row">
+              <button class="btn-primary" onclick="selectMaintenanceBuilding(${b.index})">
+                ${selectedMaintenanceBuildingIdx === b.index ? 'Maintenance Targets Selected' : 'Manage Maintenance Targets'}
+              </button>
+            </div>` : ''}
+          ${b.kind === 'Producer' ? `
+            <div class="ctrl-row">
+              <button class="btn-warn" onclick="sendAction('boost_production', [${b.index}])"
+                ${b.health < 15 || !b.is_operational ? 'disabled' : ''}>
+                Overdrive +50% Next Sol (-10 Health)
+              </button>
+            </div>` : ''}
         </div>
       </div>`;
   }).join('');
@@ -2846,10 +3810,12 @@ function renderConsole() {
     staffAllStatus.textContent = `Insufficient available specialists: ${Object.entries(staffing.shortages).map(([role, count]) => `${role} short ${count}`).join(', ')}.`;
   }
 
-  // Actions Menu (5 Set Actions + 5 Random Actions)
+  // Daily actions
   renderDailyActions();
+  renderHydroponics(readyCrew);
+  renderEvaOps();
 
-  // Crew Roster (Stable Permanent Roles — no role changing)
+  // Crew Roster
   document.getElementById('crewGrid').innerHTML = STATE.workers.map(w => `
     <div class="panel">
       <div>
@@ -2866,7 +3832,14 @@ function renderConsole() {
       </div>
       <div>
         <div class="ctrl-row">
-          <button onclick="sendAction('work', [${w.index}])" ${!w.available ? 'disabled' : ''}>General Shift (+Power)</button>
+            ${w.is_robot
+              ? '<span class="status-pill role">Universal Robot — all roles</span>'
+              : `<select id="jobRole_${w.index}">
+                  ${[['Doctor', 1], ['Engineer', 2], ['Biologist', 3], ['Geologist', 4], ['Pilot', 5]]
+                    .map(([role, code]) => `<option value="${code}" ${w.profession === role ? 'selected' : ''}>${role}</option>`).join('')}
+                </select>
+                <button onclick="changeWorkerSpecialty(${w.index})" ${w.retired || w.health <= 0 ? 'disabled' : ''}>Change Specialty (1-Sol cooldown)</button>`}
+            <button onclick="sendAction('work', [${w.index}])" ${!w.available ? 'disabled' : ''}>General Shift (+Power)</button>
           <button onclick="sendAction('rest', [${w.index}])" ${w.assigned_building || w.retired || w.health <= 0 ? 'disabled' : ''}>Rest (+HP)</button>
           <button onclick="sendAction('hospital', [${w.index}])" ${!w.available ? 'disabled' : ''}>Hospital</button>
           <button onclick="sendAction('study', [${w.index}])" ${!w.available ? 'disabled' : ''}>Study (+Skill)</button>
@@ -2880,17 +3853,19 @@ function renderConsole() {
     </div>
   `).join('');
 
-  document.getElementById('phaseScheduleLabel').textContent =
-    `Current Clearance: Phase ${u.max_phase} | Next unlocks at Sol 3 / Sol 6 / Sol 10`;
-  renderCatalog();
+  renderMaintenanceTargets();
   renderFieldOps(wOptions, u);
+  renderEarthComms();
   renderRiskPane();
 
   document.getElementById('logFeed').innerHTML = STATE.log.slice().reverse().map(line => {
-    const cls = line.includes('CRISIS') || line.includes('INCIDENT') || line.includes('shortage')
+    const text = String(line);
+    const cls = text.startsWith('HOUSTON')
+      ? 'log-entry houston'
+      : (text.includes('CRISIS') || text.includes('INCIDENT') || text.includes('shortage')
       ? 'log-entry crit'
-      : (line.includes('CLEARANCE GRANTED') ? 'log-entry unlock' : (line.includes('Sol ') ? 'log-entry sol' : 'log-entry'));
-    return `<div class="${cls}">${line}</div>`;
+      : (text.includes('CLEARANCE GRANTED') ? 'log-entry unlock' : (text.includes('Sol ') ? 'log-entry sol' : 'log-entry')));
+    return `<div class="${cls}">${escapeHtml(text)}</div>`;
   }).join('');
 
   if (STATE.mission_over && reportShownSol !== STATE.sol) {
@@ -2910,6 +3885,7 @@ function renderConsole() {
   if (tutorialIdx >= 0) setTimeout(() => applySpotlight(TUTORIAL_FLOW[tutorialIdx]), 40);
 }
 
+// Draw today's fixed and random actions with availability and completion status.
 function renderDailyActions() {
   if (!STATE || !STATE.daily_actions) return;
   const da = STATE.daily_actions;
@@ -2922,11 +3898,15 @@ function renderDailyActions() {
   rerollButton.textContent = rerollButton.disabled ? 'Daily Refresh Used' : 'Refresh Random Actions';
 
   const renderCard = (card, idx, category) => {
-    const roleTag = card.preferred_role ? ` | Specialist: ${card.preferred_role}` : '';
-    const usage = STATE.daily_action_usage[card.action];
+      const roleTag = card.preferred_role ? ` | Specialist: ${card.preferred_role}` : '';
+      const usageKey = card.action === 'hydroponics'
+      ? `${card.action}:${card.param}`
+      : card.action;
+    const usage = STATE.daily_action_usage[usageKey];
     const atLimit = usage && usage.limit > 0 && usage.used >= usage.limit;
+    const activated = Boolean(card.used_today) || Boolean(atLimit);
     const noBuildings = usage && usage.limit === 0;
-    const statusBadge = atLimit
+    const statusBadge = activated
       ? `<span class="status-pill op">ACTIVATED TODAY</span>`
       : (noBuildings
         ? `<span class="status-pill off">NO REQUIRED BUILDING</span>`
@@ -2944,7 +3924,7 @@ function renderDailyActions() {
           <div style="font-size:12px;color:#cbd5e1;margin-top:4px;">${card.effect}</div>
         </div>
         <div class="ctrl-row">
-          <button class="${btnClass}" onclick="activateDailyCard('${category}', ${idx})" ${atLimit || noBuildings ? 'disabled' : ''}>${atLimit ? 'Daily Limit Reached' : 'Activate Action'}</button>
+          <button class="${btnClass}" onclick="activateDailyCard('${category}', ${idx})" ${activated || noBuildings ? 'disabled' : ''}>${activated ? 'Activated Today' : 'Activate Action'}</button>
         </div>
       </div>
     `;
@@ -2954,6 +3934,7 @@ function renderDailyActions() {
   document.getElementById('randomActionsGrid').innerHTML = da.random.map((c, i) => renderCard(c, i, 'random')).join('');
 }
 
+// Show hazards applicable to this destination and the colony's risk estimates.
 function renderRiskPane() {
   if (!STATE) return;
   const profiles = STATE.risk_profiles || [];
@@ -2968,12 +3949,100 @@ function renderRiskPane() {
           <span class="status-pill idle">SEVERITY ${risk.severity}</span>
         </div>
         <div class="label-mono">${risk.definition}</div>
+        <div class="label-mono">Active locations: ${risk.environments.map(env => env.replace('_', ' ')).join(', ')}</div>
         <div class="label-mono" style="margin-top:5px;">Response: ${risk.response}</div>
-        <div class="label-mono" style="margin-top:8px;">Expected probability each Sol: <strong>${(risk.probability_per_sol * 100).toFixed(0)}%</strong></div>
+        <div class="label-mono" style="margin-top:8px;">Current estimated probability this Sol: <strong>${(risk.probability_per_sol * 100).toFixed(2)}%</strong> (rises slightly each Sol)</div>
       </div>
     `).join('')}`;
 }
 
+// Render the Earth message link, side-quest controls, and launch tutorial links.
+function renderEarthComms() {
+  if (!STATE) return;
+  const comms = STATE.earth_comms;
+  const panel = document.getElementById('earthCommsPanel');
+  const status = comms.blockers.length
+    ? `Communications disrupted by: ${comms.blockers.join(', ')}.`
+    : (comms.available
+      ? 'Satellite link available. One outbound transmission is allowed per Sol.'
+      : 'Launch a satellite to establish a communications link with Earth.');
+  const quest = comms.active_quest || comms.offered_quest;
+  let questHtml = '';
+  if (quest) {
+    questHtml = `
+      <div class="panel" style="margin-top:8px;">
+        <div class="panel-header">
+          <span class="panel-title">${escapeHtml(quest.name)}</span>
+          <span class="status-pill ${quest.status === 'active' ? 'op' : 'role'}">${escapeHtml(quest.status.toUpperCase())}</span>
+        </div>
+        <div class="label-mono">${escapeHtml(quest.objective_text)}</div>
+        ${quest.status === 'active' ? `
+          <div class="label-mono">Progress: ${quest.progress}/${quest.target}</div>
+          <div class="meter"><div class="meter-fill ok" style="width:${quest.progress_pct}%"></div></div>
+          <button class="btn-primary" style="margin-top:6px;" onclick="sendAction('complete_side_quest', [])"
+            ${quest.ready_to_complete && !comms.blockers.length ? '' : 'disabled'}>
+            ${comms.blockers.length ? 'Communications Disrupted' : 'Transmit Completion to Earth'}
+          </button>
+        ` : `
+          <div class="label-mono">Reward: +${quest.reward_research} research and early access to ${escapeHtml(quest.unlock_building)}.</div>
+          <button class="btn-primary" style="margin-top:6px;" onclick="sendAction('accept_side_quest', [])"
+            ${comms.blockers.length ? 'disabled' : ''}>Accept Side Quest</button>
+        `}
+      </div>`;
+  }
+  const messages = comms.messages.length
+    ? comms.messages.map(message => `
+      <div class="log-entry">
+        <strong>${escapeHtml(message.from)} · Sol ${message.sol}:</strong>
+        ${escapeHtml(message.text)}
+      </div>`).join('')
+    : '<div class="label-mono">No satellite messages yet.</div>';
+  panel.innerHTML = `
+    <div class="panel-header">
+      <span class="panel-title">Earth Messages &amp; Side Quests</span>
+      <span class="status-pill ${comms.blockers.length ? 'off' : (comms.available ? 'op' : 'idle')}">
+        ${comms.blockers.length ? 'DISRUPTED' : (comms.available ? 'SATELLITE LINK' : 'NO LINK')}
+      </span>
+    </div>
+    <div class="label-mono">${status}</div>
+    <div class="notice-strip" style="margin-top:7px;">
+      <strong>Satellite launch tutorial:</strong> reach Phase IV, manufacture a satellite and rocket, then use Orbital Launch Complex in Field Ops. Launching costs 1 satellite, 1 rocket, 80 fuel, and 50 power; an operational satellite adds passive research and enables Earth communications.
+      <div class="ctrl-row" style="margin-top:6px;">
+        <button onclick="navigateToFieldSection('satelliteLaunchPanel')">Go to Satellite Launch</button>
+        <button onclick="navigateToFieldSection('rocketOpsPanel')">Go to Earth/Mars Rocket Launch</button>
+      </div>
+    </div>
+    ${questHtml}
+    <div class="log-feed" style="height:130px;max-height:130px;margin-top:8px;">${messages}</div>
+    <div class="ctrl-row" style="margin-top:8px;">
+      <input id="earthMessageInput" type="text" maxlength="240" placeholder="Send a short message to Earth..."
+        style="flex:1;min-width:220px;" ${comms.can_send ? '' : 'disabled'} />
+      <button class="btn-primary" onclick="sendEarthMessage()" ${comms.can_send ? '' : 'disabled'}>Transmit</button>
+    </div>`;
+}
+
+// Open Field Ops and scroll to a launch control, including its locked-state notice.
+function navigateToFieldSection(sectionId) {
+  const fieldTab = document.querySelector('.nav-tab[data-pane="field"]');
+  if (!fieldTab) return toast('Field Operations is unavailable.', true);
+  selectPane('field', fieldTab);
+  setTimeout(() => {
+    const section = document.getElementById(sectionId) ||
+      document.getElementById('fieldLockedBanner');
+    if (section) section.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, 80);
+}
+
+// Transmit the text in the Earth communications panel.
+function sendEarthMessage() {
+  const input = document.getElementById('earthMessageInput');
+  if (!input) return;
+  const text = input.value.trim();
+  if (!text) return toast('Enter a message before transmitting to Earth.', true);
+  sendAction('send_earth_message', [text]);
+}
+
+// Calculate the total mass of the selected rocket payload.
 function rocketPayloadWeight() {
   return Object.entries(rocketPayload).reduce((total, [key, quantity]) => {
     const item = STATE.rocket_payload_items.find(candidate => candidate.key === key);
@@ -2981,6 +4050,7 @@ function rocketPayloadWeight() {
   }, 0);
 }
 
+// Refresh payload mass, capacity meter, and launch-button eligibility.
 function updateRocketPayloadSummary() {
   const summary = document.getElementById('rocketPayloadSummary');
   if (!summary || !STATE) return;
@@ -2995,6 +4065,7 @@ function updateRocketPayloadSummary() {
     <div class="label-mono" style="margin-top:6px;color:${weight > STATE.rocket_max_payload_kg ? 'var(--danger-hi)' : 'var(--ok-hi)'};">
       Payload: ${weight.toLocaleString()} / ${STATE.rocket_max_payload_kg.toLocaleString()} kg (${(weight / 1000).toFixed(1)} / 100 tonnes)
     </div>`;
+  summary.innerHTML += `<div class="meter"><div class="meter-fill ${weight > STATE.rocket_max_payload_kg ? 'low' : 'ok'}" style="width:${Math.min(100, weight / STATE.rocket_max_payload_kg * 100)}%"></div></div>`;
   const launch = document.getElementById('btnLaunchRocket');
   if (launch) {
     const usage = STATE.daily_action_usage.launch_rocket;
@@ -3005,6 +4076,7 @@ function updateRocketPayloadSummary() {
   }
 }
 
+// Add the selected quantity of cargo to the rocket's payload manifest.
 function addRocketPayload() {
   const key = document.getElementById('rocketPayloadItem').value;
   const quantity = Number(document.getElementById('rocketPayloadAmount').value);
@@ -3013,17 +4085,21 @@ function addRocketPayload() {
   updateRocketPayloadSummary();
 }
 
+// Remove a cargo type from the current payload manifest.
 function removeRocketPayload(key) {
   delete rocketPayload[key];
   updateRocketPayloadSummary();
 }
 
+// Validate the selected specialist and submit the rocket launch request.
 function launchResupplyRocket() {
   const workerIndex = Number(document.getElementById('selRocketWorker').value);
   if (!Number.isInteger(workerIndex)) return toast('Select an available specialist to launch the rocket.', true);
-  sendAction('launch_rocket', [workerIndex, rocketPayload]);
+  const destination = document.getElementById('rocketDestination').value;
+  sendAction('launch_rocket', [workerIndex, rocketPayload, destination]);
 }
 
+// Build the mining, expedition, manufacturing, satellite, and vehicle controls.
 function renderFieldOps(wOptions, u) {
   const banner = document.getElementById('fieldLockedBanner');
   const grid = document.getElementById('fieldGrid');
@@ -3116,13 +4192,13 @@ function renderFieldOps(wOptions, u) {
         </div>
       </div>
 
-      <div class="panel">
+      <div class="panel" id="satelliteLaunchPanel">
         <div>
           <div class="panel-header">
             <span class="panel-title">Orbital Launch Complex</span>
             <span class="status-pill op">PHASE IV</span>
           </div>
-          <div class="label-mono">Satellites permanently boost daily solar power (+20 kWh).</div>
+          <div class="label-mono">Launch from ${STATE.space_label}. Active satellites: ${STATE.active_satellites}; each adds +5 passive research and science per Sol and establishes the Earth link.</div>
         </div>
         <div class="ctrl-row">
           <select id="selOrbWorker">${wOptions}</select>
@@ -3133,6 +4209,93 @@ function renderFieldOps(wOptions, u) {
   `;
 }
 
+// Render each farm's crop settings and the actions for growing and processing plants.
+function renderHydroponics(readyCrew) {
+  const panel = document.getElementById('hydroponicsPanel');
+  if (!panel) return;
+  const crops = ['lettuce', 'wheat', 'flax', 'sunflower'];
+  const farms = STATE.buildings.filter(building => building.kind === 'Farm');
+  const usage = STATE.daily_action_usage.configure_farm;
+  const rotationUsage = STATE.daily_action_usage.hydroponics_rotation;
+  const workerOptions = readyCrew.length
+    ? readyCrew.map(worker =>
+      `<option value="${worker.index}">[${worker.index}] ${escapeHtml(worker.name)} (${worker.profession})</option>`
+    ).join('')
+    : '<option value="">No ready specialist</option>';
+  const nextCrop = STATE.hydroponics_rotation_next_crop;
+  const farmControls = farms.length ? farms.map(farm => `
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">[${farm.index}] ${escapeHtml(farm.name)}</span>
+        <span class="status-pill ${farm.is_operational ? 'op' : 'idle'}">${farm.is_operational ? 'OPERATIONAL' : 'IDLE'}</span>
+      </div>
+      <div class="label-mono">Current output: ${escapeHtml(farm.farm_crop || 'lettuce')} (${escapeHtml(farm.farm_product || 'crop')})</div>
+      <div class="ctrl-row">
+        <select id="fCrop_${farm.index}" aria-label="Crop for ${escapeHtml(farm.name)}">
+          ${crops.map(crop => `<option value="${crop}" ${farm.farm_crop === crop ? 'selected' : ''}>${crop}</option>`).join('')}
+        </select>
+        <select id="fType_${farm.index}" aria-label="Product for ${escapeHtml(farm.name)}">
+          <option value="crop" ${farm.farm_product === 'crop' ? 'selected' : ''}>Crop</option>
+          <option value="seed" ${farm.farm_product === 'seed' ? 'selected' : ''}>Seeds</option>
+        </select>
+        <button class="btn-primary" onclick="setFarm(${farm.index})"
+          ${usage.used >= usage.limit ? 'disabled' : ''}>Set Output (${usage.used}/${usage.limit})</button>
+      </div>
+    </div>
+  `).join('') : '<div class="notice-strip">No hydroponics bays are currently available.</div>';
+  panel.innerHTML = `
+    <div class="panel" style="margin-bottom:8px;">
+      <div class="panel-header">
+        <span class="panel-title">Rotating Crop Production</span>
+        <span class="status-pill op">NEXT CROP: ${nextCrop.toUpperCase()}</span>
+      </div>
+      <div class="label-mono">A production attempt advances the rotation through lettuce, wheat, flax, and sunflower. Each crop has its own action allowance; difficulty changes the number of attempts.</div>
+      <div class="ctrl-row">
+        <select id="selHydroWorker">${workerOptions}</select>
+        <button class="btn-primary" onclick="runWithWorker('hydroponics_rotation', 'selHydroWorker')"
+          ${!readyCrew.length || rotationUsage.used >= rotationUsage.limit ? 'disabled' : ''}>
+          Grow ${nextCrop} (${rotationUsage.used}/${rotationUsage.limit})
+        </button>
+        <span class="label-mono">EVA suits ready: ${STATE.eva_suits.ready} · damaged: ${STATE.eva_suits.damaged}</span>
+      </div>
+    </div>
+    <div class="panel-header" style="margin:10px 0 6px;">
+      <span class="panel-title">Hydroponics Bay Configuration</span>
+      <span class="label-mono">${usage.used}/${usage.limit} configuration actions this Sol</span>
+    </div>
+    <div class="grid-2col">${farmControls}</div>`;
+}
+
+// Show suit inventory, EVA actions, team exploration, and equipment wear.
+function renderEvaOps() {
+  const panel = document.getElementById('evaOpsPanel');
+  if (!panel) return;
+  const usage = STATE.daily_action_usage.manage_eva_suits;
+  const atLimit = usage.used >= usage.limit;
+  panel.innerHTML = `
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">EVA Suit Shop &amp; Repair Bench</span>
+        <span class="status-pill ${STATE.eva_suits.ready ? 'op' : 'idle'}">
+          READY ${STATE.eva_suits.ready} · DAMAGED ${STATE.eva_suits.damaged}
+        </span>
+      </div>
+      <div class="label-mono">Create: 8 aluminum, 6 plastic, 3 glass, 4 flax, 12 power. Repair: 2 steel, 2 plastic, 5 power. Prices scale with difficulty. A field team needs 1 car, 1 drone, 4 ready suits, 12 fuel, and 15 power.</div>
+      <div class="ctrl-row">
+        <button class="btn-primary" onclick="sendAction('manage_eva_suits', ['create'])" ${atLimit ? 'disabled' : ''}>Create EVA Suit</button>
+        <button onclick="sendAction('manage_eva_suits', ['repair'])"
+          ${atLimit || STATE.eva_suits.damaged <= 0 ? 'disabled' : ''}>Repair Damaged Suit</button>
+        <button class="btn-mars" onclick="sendAction('team_exploration', [])"
+          ${STATE.resources.cars.current < 1 || STATE.resources.drones.current < 1 || STATE.eva_suits.ready < 4 ? 'disabled' : ''}>
+          Send Exploration Team
+        </button>
+        <span class="label-mono">${usage.used}/${usage.limit} suit operations this Sol</span>
+      </div>
+      <div class="label-mono">Equipment wear — car ${STATE.exploration_wear.car.toFixed(0)}% · drone ${STATE.exploration_wear.drone.toFixed(0)}%. Outcomes and suit wear vary each expedition.</div>
+    </div>`;
+}
+
+// Display rocket unlock requirements, payload setup, and flights in transit.
 function renderRocketOps(wOptions) {
   const unlocked = STATE.rocket_resupply.unlocked;
   const requirements = STATE.rocket_resupply.requirements;
@@ -3149,9 +4312,14 @@ function renderRocketOps(wOptions) {
         </div>
         <div class="label-mono">${statusText} Thresholds: 100 Science (${requirements.science.current}/100), 500 mined units (${requirements.mined_units.current}/500), or 30 living, non-retired people (${requirements.active_people.current}/30).</div>
         <div class="label-mono" style="margin-top:5px;">Payload limit: 100 tonnes. Resource units count as 1 kg; human 80 kg; robot 500 kg; car 1,500 kg; truck 5,000 kg; rover 1,000 kg; satellite 600 kg; rocket 25,000 kg; drone 20 kg.</div>
+        <div class="label-mono" style="margin-top:5px;">Current game-scaled orbital-window estimates: Mars ${STATE.rocket_transit_estimates.mars} Sols; Moon ${STATE.rocket_transit_estimates.moon} Sols. Flight duration changes with the target's position relative to Earth.</div>
       </div>
       <div class="ctrl-row">
         <select id="selRocketWorker">${wOptions}</select>
+        <select id="rocketDestination" aria-label="Rocket destination">
+          <option value="mars">Mars</option>
+          <option value="moon">Moon</option>
+        </select>
         <select id="rocketPayloadItem">
           ${STATE.rocket_payload_items.map(item => `<option value="${item.key}">${item.label} (${item.weight_kg} kg/unit)</option>`).join('')}
         </select>
@@ -3160,10 +4328,23 @@ function renderRocketOps(wOptions) {
       </div>
       <div id="rocketPayloadSummary"></div>
       <div class="ctrl-row">
-        <button class="btn-ok" id="btnLaunchRocket" onclick="launchResupplyRocket()" ${unlocked && rocketUsage.used < rocketUsage.limit ? '' : 'disabled'}>Launch Resupply (1 Rocket, 120 Fuel, 60 Power)</button>
+        <button class="btn-ok" id="btnLaunchRocket" onclick="launchResupplyRocket()" ${unlocked && rocketUsage.used < rocketUsage.limit ? '' : 'disabled'}>Launch Free Resupply</button>
         <span class="label-mono">Launches today: ${rocketUsage.used}/${rocketUsage.limit}</span>
-        <span class="label-mono">Launch yields science and delivers the selected cargo.</span>
+        <span class="label-mono">Launches from Earth; cargo arrives after the displayed transit time.</span>
       </div>
+      <div class="panel-header" style="margin-top:10px;"><span class="panel-title">Earth Resupply Flights in Transit</span></div>
+      ${STATE.pending_rockets.length ? STATE.pending_rockets.map(rocket => `
+        <div class="panel" style="margin-top:6px;">
+          <div class="panel-header">
+            <span class="panel-title">Rocket #${rocket.id} → ${rocket.destination}</span>
+            <span class="label-mono">Sol ${rocket.elapsed_sols}/${rocket.transit_sols} · ${rocket.payload_weight_kg.toLocaleString()} kg</span>
+          </div>
+          <div class="label-mono">Transit progress</div>
+          <div class="meter"><div class="meter-fill ok" style="width:${rocket.progress_pct}%"></div></div>
+          <div class="label-mono">Payload mass (${Math.round(rocket.payload_weight_kg / STATE.rocket_max_payload_kg * 100)}% capacity)</div>
+          <div class="meter"><div class="meter-fill ${rocket.payload_weight_kg > STATE.rocket_max_payload_kg ? 'low' : 'ok'}" style="width:${Math.min(100, rocket.payload_weight_kg / STATE.rocket_max_payload_kg * 100)}%"></div></div>
+        </div>
+      `).join('') : '<div class="label-mono">No rockets currently in transit.</div>'}
     </div>`;
   const itemSelect = document.getElementById('rocketPayloadItem');
   const quantityInput = document.getElementById('rocketPayloadAmount');
@@ -3177,6 +4358,7 @@ function renderRocketOps(wOptions) {
   updateRocketPayloadSummary();
 }
 
+// Save the crop and product type selected for one hydroponics bay.
 function setFarm(bIdx) {
   sendAction('configure_farm', [
     bIdx,
@@ -3184,38 +4366,66 @@ function setFarm(bIdx) {
     document.getElementById('fType_' + bIdx).value
   ]);
 }
+// Save the selected building assignments for the active Service Building.
+function saveMaintenanceTargets() {
+  const service = STATE.buildings.find(building =>
+    building.kind === 'Service' && building.index === selectedMaintenanceBuildingIdx
+  );
+  const select = document.getElementById('maintenanceTargetSelector');
+  if (!service || !select) return toast('Select a Service Building to manage maintenance assignments.', true);
+  const targets = [...select.selectedOptions].map(option => Number(option.value));
+  if (targets.length > 10) return toast('A Service Building can maintain at most 10 buildings.', true);
+  sendAction('set_maintenance_targets', [service.index, targets]);
+}
+
+// Open or close the maintenance target menu for a specific Service Building.
+function selectMaintenanceBuilding(buildingIndex) {
+  if (buildingIndex === null) {
+    selectedMaintenanceBuildingIdx = null;
+  } else {
+    const service = STATE.buildings.find(building =>
+      building.kind === 'Service' && building.index === buildingIndex
+    );
+    if (!service) return toast('Select the Maintenance Service Building to manage its targets.', true);
+    selectedMaintenanceBuildingIdx = buildingIndex;
+  }
+  renderConsole();
+}
+// Submit a research-lab action using the selected synthesis amount.
 function runLab(bIdx) {
   sendAction('run_research', [bIdx, parseInt(document.getElementById('rPts_' + bIdx).value, 10) || 1]);
 }
 
-function renderCatalog() {
-  if (!STATE) return;
-  const q = (document.getElementById('filterInput').value || '').toLowerCase();
-  const showLocked = document.getElementById('showLockedChk').checked;
-  const buildUsage = STATE.daily_action_usage.construct_building;
-  const items = STATE.catalog.filter(c => {
-    if (!showLocked && !c.unlocked) return false;
-    return c.key.includes(q) || c.name.toLowerCase().includes(q) || c.type.toLowerCase().includes(q);
-  });
-  document.getElementById('catalogGrid').innerHTML = items.map(c => {
-    const reqs = Object.entries(c.required_professions).map(([p, [lo, hi]]) => `${p} ${lo}-${hi}`).join(', ') || 'none';
-    const actionBtn = c.unlocked && buildUsage.used < buildUsage.limit
-      ? `<button class="btn-primary" onclick="sendAction('construct_building', ['${c.key}'])">Construct</button>`
-      : (c.unlocked
-        ? `<button class="btn-primary" disabled>Daily Build Limit Reached</button>`
-        : `<span class="status-pill idle">LOCKED (${c.unlock_req})</span>`);
-    return `
-      <div class="panel" style="${c.unlocked ? '' : 'opacity:0.62;'}">
-        <div class="panel-header">
-          <span class="panel-title">${c.name} <span class="label-mono">[${c.key}]</span></span>
-          ${actionBtn}
-        </div>
-        <div class="label-mono">Cost: ${c.power_cost} Power, ${c.steel_cost} Steel, ${c.aluminum_cost} Al | Vol: ${c.volume}m&sup3;</div>
-        <div class="label-mono">Staff (${c.max_workers} max): ${reqs} | Upkeep: ${fmtCosts(c.operating_costs)}</div>
-      </div>`;
-  }).join('');
+// Populate target choices and operational status for the selected service facility.
+function renderMaintenanceTargets() {
+  const selector = document.getElementById('maintenanceTargetSelector');
+  if (!selector) return;
+  const service = STATE.buildings.find(building =>
+    building.kind === 'Service' && building.index === selectedMaintenanceBuildingIdx
+  );
+  const status = document.getElementById('maintenanceTargetsStatus');
+  const buildingLabel = document.getElementById('maintenanceTargetsBuilding');
+  if (!service) {
+    selector.innerHTML = '';
+    selector.disabled = true;
+    status.textContent = 'Select a Service Building to manage its targets.';
+    buildingLabel.textContent = '';
+    return;
+  }
+  buildingLabel.textContent = `Selected: [${service.index}] ${service.name}`;
+  selector.disabled = false;
+  selector.innerHTML = STATE.buildings
+    .filter(target => target.kind !== 'Service')
+    .map(target => `<option value="${target.index}" ${
+      service.maintenance_target_indices.includes(target.index) ? 'selected' : ''
+    }>${target.index}: ${escapeHtml(target.name)}</option>`)
+    .join('');
+  status.textContent =
+    `${service.maintenance_target_indices.length}/${service.service_capacity} selected · ` +
+    `${service.is_operational ? 'service active' : 'service needs staffing'}`;
 }
 
+// Bootstrap the console with the first server snapshot.
 loadState();
 </script>
 </body>
@@ -3224,8 +4434,10 @@ loadState();
 
 
 def make_handler(session: MissionSession):
+    """Create request handlers that expose the UI and mission APIs."""
     class Handler(BaseHTTPRequestHandler):
         def _send_json(self, payload: Any, status: int = HTTPStatus.OK) -> None:
+            """Encode a value as JSON and send it with the requested HTTP status."""
             body = json.dumps(payload).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -3234,6 +4446,7 @@ def make_handler(session: MissionSession):
             self.wfile.write(body)
 
         def do_GET(self) -> None:
+            """Serve the browser page, current mission state, or setup choices."""
             path = urlparse(self.path).path
             if path in ("/", "/index.html"):
                 body = HTML_PAGE.encode("utf-8")
@@ -3250,6 +4463,7 @@ def make_handler(session: MissionSession):
                 self.send_error(HTTPStatus.NOT_FOUND)
 
         def do_POST(self) -> None:
+            """Parse action or new-mission requests and return their results."""
             path = urlparse(self.path).path
             length = int(self.headers.get("Content-Length", "0"))
             raw = self.rfile.read(length).decode("utf-8") if length > 0 else "{}"
@@ -3275,6 +4489,8 @@ def make_handler(session: MissionSession):
                         human_candidate_ids=data.get("human_candidate_ids"),
                         robot_candidate_ids=data.get("robot_candidate_ids"),
                         starting_resources=data.get("starting_resources"),
+                        starting_buildings=data.get("starting_buildings"),
+                        difficulty=str(data.get("difficulty", "easy")),
                     )
                 except (TypeError, ValueError) as err:
                     self._send_json({"ok": False, "message": str(err)}, HTTPStatus.BAD_REQUEST)
@@ -3284,12 +4500,14 @@ def make_handler(session: MissionSession):
                 self.send_error(HTTPStatus.NOT_FOUND)
 
         def log_message(self, format: str, *args: Any) -> None:
+            """Keep the standard-library request log from cluttering the console."""
             pass
 
     return Handler
 
 
 def main() -> None:
+    """Parse server options, create a mission, and run the local web server."""
     parser = argparse.ArgumentParser(description="Living on Red — Daedalus Team Mission Control UI")
     parser.add_argument("--host", default="127.0.0.1", help="Bind address (default 127.0.0.1)")
     parser.add_argument("--port", type=int, default=8000, help="Port number (default 8000)")
