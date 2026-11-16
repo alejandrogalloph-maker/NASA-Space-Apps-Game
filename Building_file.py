@@ -1,7 +1,7 @@
 """Building types, their local resource storage, and colony logistics."""
 
 import Resource_Class as resource_inventory
-from typing import Protocol
+from typing import Mapping, Protocol
 
 
 all_buildings: list["building"] = []
@@ -17,6 +17,8 @@ class BuildingWorker(Protocol):
     """Worker operations that buildings need for staffing and wages."""
 
     def getType(self) -> ProfessionLike: ...
+
+    def getHealth(self) -> int | float: ...
 
     def getWage(self) -> int | float: ...
 
@@ -73,6 +75,8 @@ class building:
         if not 0 <= safety_rating <= 100:
             raise ValueError("safety_rating must be between 0 and 100")
         self.safety_rating = safety_rating
+        self.health = 100.0
+        self.production_boost = 1.0
         self.workers: list[BuildingWorker] = []
         # Buildings begin operational; turning one off does not clear its storage.
         self.is_on = True
@@ -99,7 +103,8 @@ class building:
     def assign_worker(self, worker: BuildingWorker) -> None:
         """Assign an available worker if their profession is permitted and in capacity."""
         profession = worker.getType().name
-        if profession not in type(self).required_professions:
+        is_universal_robot = bool(getattr(worker, "is_robot", False))
+        if profession not in type(self).required_professions and not is_universal_robot:
             raise ValueError(
                 f"{profession} workers cannot work in {type(self).__name__}"
             )
@@ -113,35 +118,36 @@ class building:
                 f"{type(self).max_worker_capacity} workers"
             )
 
-        _, maximum = type(self).required_professions[profession]
-        current_count = self._profession_counts().get(profession, 0)
-        if current_count >= maximum:
-            raise ValueError(
-                f"{type(self).__name__} allows at most {maximum} "
-                f"{profession} worker(s)"
-            )
+        if not is_universal_robot:
+            _, maximum = type(self).required_professions[profession]
+            current_count = self._profession_counts().get(profession, 0)
+            if current_count >= maximum:
+                raise ValueError(
+                    f"{type(self).__name__} allows at most {maximum} "
+                    f"{profession} worker(s)"
+                )
         if not worker.SendToWork():
             raise ValueError("Worker could not be assigned")
         self.workers.append(worker)
 
     def remove_worker(self, worker: BuildingWorker) -> None:
-        """Remove an assigned worker and return them to the available workforce."""
+        """Remove an assigned worker without bypassing the sol recovery cycle."""
         if worker not in self.workers:
             raise ValueError("Worker is not assigned to this building")
         self.workers.remove(worker)
-        worker.SendToRest()
 
     def has_required_staff(self) -> bool:
         """Check that minimum staffing for every required profession is met."""
         counts = self._profession_counts()
-        return all(
-            counts.get(profession, 0) >= minimum
+        missing_roles = sum(
+            max(0, minimum - counts.get(profession, 0))
             for profession, (minimum, _) in type(self).required_professions.items()
         )
+        return missing_roles <= counts.get("Robot", 0)
 
     def is_operational(self) -> bool:
         """A building operates only when on and all role minimums are staffed."""
-        return self.is_on and self.has_required_staff()
+        return self.is_on and self.health > 0 and self.has_required_staff()
 
     def get_info(self) -> str:
         """Return a readable summary of costs, staffing, volume, and state."""
@@ -191,12 +197,12 @@ class building:
             if amount < 0:
                 raise ValueError("Resource costs must be non-negative")
             inventories[resource_name] = inventory
-            if inventory.getResources() < amount:
+            if inventory.getResources() < inventory.required_amount(amount):
                 return False
 
         # Validate the entire recipe first so resources are never partly charged.
         for resource_name, amount in recipe.items():
-            inventories[resource_name].SubtractResources(amount)
+            inventories[resource_name].consumeResources(amount)
         return True
 
     def turn_on(self) -> None:
@@ -274,9 +280,9 @@ class OxygenGenerator(ResourceBuilding):
     resource_attribute = "oxigen"
     maintenance_cost = 6
     production_cost = 400
-    worker_cost = 3
-    max_worker_capacity = 4
-    required_professions = {"Engineer": (1, 4)}
+    worker_cost = 0
+    max_worker_capacity = 0
+    required_professions = {}
     operating_resource_costs = {"electricity": 5, "water": 1}
 
 
@@ -329,9 +335,9 @@ class PowerPlant(ResourceBuilding):
     resource_attribute = "electricity"
     maintenance_cost = 15
     production_cost = 1000
-    worker_cost = 5
-    max_worker_capacity = 8
-    required_professions = {"Engineer": (1, 8)}
+    worker_cost = 0
+    max_worker_capacity = 0
+    required_professions = {}
     operating_resource_costs = {}
 
 
@@ -480,6 +486,39 @@ class DroneFactory(ResourceBuilding):
     operating_resource_costs = {"electricity": 8, "aluminum": 1, "plastic": 2}
 
 
+class RobotFactory(building):
+    """Fabricates colony robots through the dedicated robot-production action."""
+
+    maintenance_cost = 20
+    production_cost = 1800
+    worker_cost = 5
+    max_worker_capacity = 4
+    volume = 250
+    required_professions = {}
+    operating_resource_costs = {"electricity": 5}
+
+
+class ServiceBuilding(building):
+    """Maintenance depot that can service a fixed number of colony buildings."""
+
+    maintenance_cost = 8
+    production_cost = 600
+    worker_cost = 4
+    max_worker_capacity = 4
+    max_serviceable_buildings = 10
+    required_professions = {"Engineer": (1, 4)}
+    operating_resource_costs = {"electricity": 2}
+
+    def __init__(
+        self,
+        name: str,
+        safety_rating: int | float = 0,
+        number_of_workers: int = 0,
+    ):
+        super().__init__(name, safety_rating, number_of_workers)
+        self.maintenance_targets: list[building] = []
+
+
 class Farm(ResourceBuilding):
     """Produces seeds or crops for one selected crop variety."""
 
@@ -562,10 +601,10 @@ class Habitation(building):
     maintenance_cost = 20
     production_cost = 1200
     worker_cost = 4
-    max_worker_capacity = 6
+    max_worker_capacity = 0
     volume = 500
     resident_capacity = 20
-    required_professions = {"Doctor": (1, 6)}
+    required_professions = {}
     operating_resource_costs = {"electricity": 4, "oxigen": 1, "water": 2, "food": 2}
 
 
@@ -601,7 +640,8 @@ class LogisticsBuilding(building):
     worker_cost = 5
     max_worker_capacity = 8
     volume = 300
-    transfer_amount: int | float = 100
+    transfer_amount: int | float = 1000
+    daily_transfer_limit: int | float = 1000
     required_professions = {"Pilot": (1, 8)}
     operating_resource_costs = {"electricity": 3}
 
@@ -610,20 +650,20 @@ class LogisticsBuilding(building):
         name: str,
         safety_rating: int | float = 0,
         number_of_workers: int = 0,
-        transfer_amount: int | float = 100,
+        transfer_amount: int | float = 1000,
     ):
-        """Configure a non-negative per-resource transfer limit for each turn."""
+        """Configure a non-negative per-resource cap, bounded by the daily hub limit."""
         if transfer_amount < 0:
             raise ValueError("Transfer amount must be non-negative")
         super().__init__(name, safety_rating, number_of_workers)
         self.transfer_amount = transfer_amount
+        self.transferred_today: int | float = 0
 
     def get_info(self) -> str:
         """Include the configured per-turn resource transfer limit."""
         return (
             super().get_info()
-            + f", Transfer Amount per Resource Building per Turn: "
-            f"{self.transfer_amount}"
+            + f", Daily Transfer Limit: {self.daily_transfer_limit}"
         )
 
     def process_turn(
@@ -633,13 +673,18 @@ class LogisticsBuilding(building):
         transferred: dict[str, int | float] = {}
         if not self.has_required_staff():
             return transferred
+        remaining = max(0, self.daily_transfer_limit - self.transferred_today)
         for source in buildings:
+            if remaining <= 0:
+                break
             if not isinstance(source, ResourceBuilding):
                 raise TypeError("Logistics can only transfer from resource buildings")
             for resource_name, local_storage in source.storage.items():
-                # Limit transfer by both the configured cap and local stock.
+                if remaining <= 0:
+                    break
                 requested = min(
                     self.transfer_amount,
+                    remaining,
                     local_storage.getResources(),
                 )
                 if requested <= 0:
@@ -655,6 +700,8 @@ class LogisticsBuilding(building):
                     transferred[resource_name] = (
                         transferred.get(resource_name, 0) + accepted
                     )
+                    self.transferred_today += accepted
+                    remaining -= accepted
         return transferred
 
 
@@ -711,7 +758,8 @@ class ResearchBuilding(building):
             return 0
 
         research_inventory = resource_inventory.research
-        if research_inventory.getMaxResources() - research_inventory.getResources() < amount:
+        research_cost = research_inventory.required_amount(amount)
+        if research_inventory.getMaxResources() - research_inventory.getResources() < research_cost:
             return 0
 
         # Check every input before subtracting any, so an incomplete recipe costs nothing.
@@ -721,11 +769,11 @@ class ResearchBuilding(building):
         }
         for resource_name, required in required_resources.items():
             inventory = getattr(resource_inventory, resource_name)
-            if inventory.getResources() < required:
+            if             inventory.getResources() < inventory.required_amount(required):
                 return 0
 
         for resource_name, required in required_resources.items():
-            getattr(resource_inventory, resource_name).SubtractResources(required)
+            getattr(resource_inventory, resource_name).consumeResources(required)
 
         research_inventory.addResources(amount)
         return amount
@@ -764,20 +812,20 @@ class University(building):
         super().__init__(name, safety_rating, number_of_workers)
 
     @staticmethod
-    def _consume_resources(resource_costs: dict[str, int | float]) -> bool:
+    def _consume_resources(resource_costs: Mapping[str, int | float]) -> bool:
         """Consume a recipe only when every required colony inventory can pay it."""
         inventories = {
             resource_name: getattr(resource_inventory, resource_name)
             for resource_name in resource_costs
         }
         if any(
-            inventory.getResources() < amount
+            inventory.getResources() < inventory.required_amount(amount)
             for resource_name, inventory in inventories.items()
             for amount in (resource_costs[resource_name],)
         ):
             return False
         for resource_name, amount in resource_costs.items():
-            inventories[resource_name].SubtractResources(amount)
+            inventories[resource_name].consumeResources(amount)
         return True
 
     def produce_research(self) -> int | float:
@@ -793,6 +841,8 @@ class University(building):
         """Train an available worker in a profession, charging research and resources."""
         if not self.is_operational():
             return False
+        if getattr(worker, "is_robot", False):
+            raise ValueError("Universal Robots cannot change their profession.")
         if not worker.isAvailable():
             raise ValueError("Worker must be available to receive training")
         if profession_name not in self.TRAINABLE_PROFESSIONS:
@@ -802,10 +852,11 @@ class University(building):
         profession = getattr(profession_type, profession_name, None)
         if profession is None:
             raise ValueError(f"Worker does not support profession: {profession_name}")
-        if resource_inventory.research.getResources() < self.TRAINING_RESEARCH_COST:
+        if resource_inventory.research.getResources() < resource_inventory.research.required_amount(self.TRAINING_RESEARCH_COST):
             return False
         if any(
-            getattr(resource_inventory, name).getResources() < amount
+            getattr(resource_inventory, name).getResources()
+            < getattr(resource_inventory, name).required_amount(amount)
             for name, amount in self.TRAINING_RESOURCE_COSTS.items()
         ):
             return False
@@ -813,7 +864,7 @@ class University(building):
         # Check all costs before deducting any, so failed training spends nothing.
         if not self._consume_resources(self.TRAINING_RESOURCE_COSTS):
             return False
-        resource_inventory.research.SubtractResources(self.TRAINING_RESEARCH_COST)
+        resource_inventory.research.consumeResources(self.TRAINING_RESEARCH_COST)
         worker.setProfession(profession)
         return True
 
