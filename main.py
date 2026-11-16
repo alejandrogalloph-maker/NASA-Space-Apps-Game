@@ -23,6 +23,12 @@ from Building_file import (
     SteelMill,
     Habitation,
     LogisticsBuilding,
+    RobotFactory,
+    RadioisotopeThermoelectricGenerator,
+    ServiceBuilding,
+    Farm,
+    IceMinor,
+    AluminumMine,
 )
 from actions import (
     SPACE_ENVIRONMENTS,
@@ -30,6 +36,7 @@ from actions import (
     ActionRouter,
     expand_resource_max,
     add_resource,
+    build_from_catalog,
 )
 
 STARTING_STOCK: Dict[str, tuple[float, float]] = {
@@ -110,8 +117,12 @@ def setup_game(
     *,
     workers: Optional[List[Worker]] = None,
     starting_resources: Optional[Dict[str, float]] = None,
+    starting_buildings: Optional[Dict[str, int]] = None,
+    difficulty: str = "easy",
 ) -> ActionRouter:
     all_buildings.clear()
+    resource_inventory.research.max = 10000
+    resource_inventory.research.current = 0
     pool = {
         'water': water, 'oxigen': oxigen, 'CO2': CO2, 'Nitrogen': Nitrogen,
         'Hydrogen': Hydrogen, 'food': food, 'electricity': electricity, 'fuel': fuel,
@@ -137,31 +148,53 @@ def setup_game(
 
     if workers is None:
         workers = [Worker(10000 + i * 350) for i in range(max(0, min(50, crew_count)))]
+    starting_buildings = starting_buildings or {}
+    if not isinstance(starting_buildings, dict):
+        raise ValueError('Starting buildings must be an object of building counts.')
+    extra_buildings = []
+    for key, count in starting_buildings.items():
+        if not isinstance(key, str) or not isinstance(count, int) or isinstance(count, bool) or not 0 <= count <= 5:
+            raise ValueError('Starting building counts must be whole numbers from 0 to 5.')
+        for _ in range(count):
+            building = build_from_catalog(key)
+            if building is None:
+                raise ValueError(f'Unknown starting building type: {key}.')
+            extra_buildings.append(building)
+    if len(extra_buildings) > 15:
+        raise ValueError('Choose no more than 15 additional starting buildings.')
+
     buildings = [
         Habitation('Main Habitation Dome', safety_rating=98),
         PowerPlant('Main Solar Power Plant', safety_rating=96),
+        RadioisotopeThermoelectricGenerator(
+            'Backup Radioisotope Generator', safety_rating=99
+        ),
         OxygenGenerator('MOXIE Oxygen Generator', safety_rating=95),
         FoodFactory('Hydroponic Food Factory', safety_rating=96),
         WaterExtractor('Subsurface Water Extractor', safety_rating=92),
-        LogisticsBuilding('Central Logistics Hub', safety_rating=96, transfer_amount=25000),
+        LogisticsBuilding('Central Logistics Hub', safety_rating=96, transfer_amount=1000),
         SteelMill('Colony Steel Mill', safety_rating=90),
-    ]
-    state = GameState(pool, workers, buildings, space_key=space_key)
-    state.hazard_manager.compute_risk_probability(state)
-
+        RobotFactory('Robot Factory', safety_rating=95),
+        ServiceBuilding('Maintenance Service Building', safety_rating=96),
+        IceMinor('Subsurface Ice Mining Post', safety_rating=90),
+        AluminumMine('Regolith Aluminum Mining Post', safety_rating=90),
+        Farm('Hydroponics Bay', crop='lettuce', safety_rating=96),
+        Farm('Hydroponics Bay', crop='wheat', safety_rating=96),
+    ] + extra_buildings
+    state = GameState(
+        pool, workers, buildings, space_key=space_key, difficulty=difficulty
+    )
     router = ActionRouter(state)
     default_roles = [1, 2, 3, 4, 5, 2]
     for idx, worker in enumerate(workers):
         if worker.getType() == Profession.Unassigned:
-            router.execute('assign_job', idx, default_roles[idx % len(default_roles)])
+            worker.setType(default_roles[idx % len(default_roles)])
 
     initial_assignments = [
-        (0, 0),
-        (1, 1),
-        (3, 2),
-        (4, 3),
-        (5, 4),
-        (2, 5),
+        (9, 1),
+        (4, 2),
+        (5, 3),
+        (6, 4),
     ]
     for b_idx, w_idx in initial_assignments:
         if b_idx < len(buildings) and w_idx < len(workers):
@@ -299,7 +332,7 @@ def main() -> None:
 
         print()
         print('Routes:', ', '.join(router.available_actions()))
-        print('Build types: power, water, iceminer, oxygen, co2, nitrogen, hydrogen, food, fuel, aluminum, steel, soil, plastic, glass, farm_lettuce, farm_wheat, habitation, recreation, canteen, logistics, research, university, medical_bay, hospital, graveyard, comms_hub, satellite_dish')
+        print('Use process_harvest <worker_index> to process plants, or construct_building <worker_index> <building_type> to build.')
         print()
         raw = input('Enter command (e.g. advance_sol | staff_building 2 5 | mine 5 | quit): ').strip()
         if not raw:
@@ -314,16 +347,18 @@ def main() -> None:
         try:
             if cmd in {'advance_sol', 'balance_atmosphere', 'feed_crew', 'maintain_buildings', 'resolve_crises', 'transfer_logistics'}:
                 router.execute(cmd)
-            elif cmd in {'advance_sols', 'work', 'rest', 'hospital', 'study', 'retire', 'run_moxie', 'mine', 'produce_fuel', 'deploy_rover', 'fly_drone', 'launch_satellite', 'launch_rocket', 'toggle_building'}:
+            elif cmd in {'advance_sols', 'work', 'rest', 'hospital', 'study', 'retire', 'run_moxie', 'mine', 'produce_fuel', 'deploy_rover', 'fly_drone', 'launch_satellite', 'launch_rocket', 'fabricate_robot', 'toggle_building'}:
                 router.execute(cmd, int(parts[1]))
             elif cmd in {'assign_job', 'staff_building', 'unstaff_building', 'run_research'}:
                 router.execute(cmd, int(parts[1]), int(parts[2]))
-            elif cmd in {'hydroponics', 'food_refinery', 'refine_materials', 'manufacture'}:
+            elif cmd in {'hydroponics', 'refine_materials', 'manufacture'}:
                 router.execute(cmd, int(parts[1]), parts[2])
+            elif cmd == 'process_harvest':
+                router.execute(cmd, int(parts[1]))
             elif cmd == 'university_train':
                 router.execute(cmd, int(parts[1]), int(parts[2]), parts[3])
             elif cmd == 'construct_building':
-                router.execute(cmd, parts[1])
+                router.execute(cmd, int(parts[1]), parts[2])
             elif cmd == 'operate_factory':
                 router.execute(cmd, int(parts[1]), [int(x) for x in parts[2:]])
             else:
