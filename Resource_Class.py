@@ -2,6 +2,7 @@ class resources:
     def __init__(self, current: int | float = 0, max_val: int | float = 0):
         self.max = max(0, max_val)
         self.current = max(0, min(current, self.max))
+        self.cost_multiplier = 1.0
 
     def getResources(self):
         return self.current
@@ -24,6 +25,14 @@ class resources:
         else:
             self.current = max(0, round(self.current - N, 6))
             return True
+
+    def required_amount(self, amount: int | float) -> float:
+        """Return the difficulty-adjusted amount needed for a resource cost."""
+        return float(amount) * float(self.cost_multiplier)
+
+    def consumeResources(self, amount: int | float) -> bool:
+        """Consume an amount adjusted for difficulty, without scaling transfers."""
+        return self.SubtractResources(self.required_amount(amount))
 
     def AddMax(self, N: int | float):
         if N < 0:
@@ -75,3 +84,4 @@ sunflower = resources()
 
 # Created here so it exists before any building or GameState uses it.
 research = resources(0, 10000)
+radioisotope_fuel = resources()
